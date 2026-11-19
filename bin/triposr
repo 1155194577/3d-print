@@ -1,0 +1,57 @@
+#!/bin/bash
+# triposr — turn any photo into a printable 3D model.
+#
+#   triposr photo.jpg
+#   triposr chair.jpg --height 800
+#   triposr --help
+#
+# Interpreter order of preference:
+#   1. $TRIPOSR_PYTHON, if you set it
+#   2. the conda env `triposr`  (recommended; ~/miniconda3/envs/triposr)
+#   3. research/triposr_env311  (older venv, kept as a fallback)
+# It also points the model caches at the workspace, because the default
+# ~/.cache locations are not always writable on this machine.
+
+set -euo pipefail
+
+# Resolve the real script even when invoked through a symlink on PATH (e.g.
+# ~/.local/bin/triposr). Without this, BASH_SOURCE stays the symlink path and
+# ROOT collapses to ~/.local, which then looks for ~/.local/tools/img2mesh.py.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    case "$SOURCE" in
+        /*) ;;
+        *) SOURCE="$DIR/$SOURCE" ;;
+    esac
+done
+SELF="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+ROOT="$(cd "$SELF/.." && pwd)"
+
+export HF_HOME="${HF_HOME:-$ROOT/research/hf_cache}"
+export U2NET_HOME="${U2NET_HOME:-$ROOT/research/rembg_cache/models/bria-rmbg}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-$ROOT/research/mpl_cache}"
+export TOKENIZERS_PARALLELISM=false
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
+
+CONDA_PREFIX_DIR="${CONDA_PREFIX_DIR:-$HOME/miniconda3/envs/triposr}"
+CONDA_PY="$CONDA_PREFIX_DIR/bin/python"
+VENV_PY="$ROOT/research/triposr_env311/bin/python"
+
+if [ -n "${TRIPOSR_PYTHON:-}" ] && [ -x "$TRIPOSR_PYTHON" ]; then
+    PY="$TRIPOSR_PYTHON"
+elif [ -x "$CONDA_PY" ]; then
+    PY="$CONDA_PY"
+elif [ -x "$VENV_PY" ]; then
+    PY="$VENV_PY"
+else
+    echo "error: no usable Python found for TripoSR." >&2
+    echo "       build the conda env with:" >&2
+    echo "         conda create -n triposr python=3.11" >&2
+    echo "         conda run -n triposr pip install -r research/triposr_requirements.txt" >&2
+    echo "         conda run -n triposr pip install git+https://github.com/tatsy/torchmcubes.git" >&2
+    exit 1
+fi
+
+exec "$PY" "$ROOT/tools/img2mesh.py" "$@"

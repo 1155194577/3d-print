@@ -1,0 +1,32 @@
+# model weights and caches — downloaded on first run, never commit
+research/hf_cache/
+research/rembg_cache/
+research/mpl_cache/
+
+# python environments
+research/triposr_env*/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# bundled apps / binaries
+tools/OpenSCAD.app/
+
+# generated meshes, models and print artefacts
+*.stl
+*.obj
+*.ply
+*.glb
+*.gcode
+*.3mf
+*.step
+*.step.gz
+
+# macOS
+.DS_Store
+
+# upstream TripoSR checkout extras (source files are vendored above)
+research/triposr/examples/
+research/triposr/figures/
+research/triposr/gradio_app.py
