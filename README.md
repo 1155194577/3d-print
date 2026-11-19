@@ -137,3 +137,12 @@ CONDA_PREFIX_DIR=/opt/conda/envs/triposr triposr photo.jpg
 - Background removal: `rembg` with the `bria-rmbg` ONNX model, which carries its own
   licence terms — also review before commercial use.
 - If you feed this into a published model or dataset, credit the upstream projects.
+
+## Repository notes
+
+- `research/triposr/` holds a vendored copy of upstream TripoSR's **source only**
+  (MIT). Its local checkout still contains its own `.git`, so from the repo root
+  `git add research/triposr` is silently ignored (nested-repository detection).
+  Add files explicitly instead, e.g. `git add research/triposr/tsr/`.
+- Model weights and caches (`research/hf_cache`, `research/rembg_cache`) are
+  git-ignored; `setup.sh` recreates the environment from scratch.
