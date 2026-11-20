@@ -21,6 +21,7 @@ triposr photo.jpg --fit-bed 220x220x250
 | `bin/triposr` | Shell wrapper: pins the interpreter, sets model caches, execs the pipeline |
 | `tools/img2mesh.py` | The pipeline: TripoSR call → scale → flatten → repair → base plate → export |
 | `tools/preview_stl.py` | Optional: render an STL to three orthographic PNG views for a quick look |
+| `server/` | FastAPI web app: upload a photo in the browser, watch progress, download the STL |
 | `research/triposr/` | Upstream TripoSR source (`run.py`, `tsr/`), MIT licensed |
 | `research/triposr_requirements.txt` | Exact pinned dependency set that is known to work |
 | `setup.sh` | Builds the conda env `triposr` from scratch |
@@ -62,6 +63,74 @@ Using a different conda root? Override at runtime:
 TRIPOSR_PYTHON=/opt/conda/envs/triposr/bin/python triposr photo.jpg
 # or
 CONDA_PREFIX_DIR=/opt/conda/envs/triposr triposr photo.jpg
+```
+
+## Linux and GPU hosts (AutoDL, Colab-like images)
+
+These images usually ship a conda whose channels are pointed at a mirror that
+refuses the host's IP, so `conda create` dies with something like:
+
+```
+UnavailableInvalidChannel: HTTP 403 FORBIDDEN for channel anaconda/pkgs/main
+<https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main>
+```
+
+That is a mirror problem, not a project problem. `setup.sh` handles two cases:
+
+```bash
+./setup.sh --venv        # skip conda entirely, build .venv from the image's python
+./setup.sh --conda       # force conda (use with -c conda-forge when needed)
+./setup.sh               # auto: conda, then fall back to .venv
+```
+
+On a China-hosted box, mirror everything:
+
+```bash
+export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+export GITHUB_MIRROR=https://ghproxy.com/          # for the torchmcubes clone
+export HF_ENDPOINT=https://hf-mirror.com           # for model weights
+./setup.sh --venv
+```
+
+CUDA notes: the PyPI `torch` wheel for linux-64 is a CUDA build, so `img2mesh.py`
+auto-selects `cuda` and no `--device` flag is needed. `torchmcubes` compiles
+against the CUDA toolkit when `nvcc` is present, otherwise it builds CPU-only
+(slower marching cubes, same output). Passthrough env from the shell matters for
+the web app too — it inherits `HF_HOME`, `TRIPOSR_PYTHON`, etc.
+
+## Web app (FastAPI)
+
+```
+server/
+├── app.py              job queue, SSE progress, upload validation, STL/preview routes
+├── static/index.html   single page: drag-and-drop, live stages, preview, download
+└── tests/              API tests driven by a fake pipeline (no GPU needed)
+```
+
+Run it:
+
+```bash
+pip install -r server/requirements-web.txt
+python -m uvicorn server.app:app --host 0.0.0.0 --port 6006
+```
+
+| Route | Purpose |
+|---|---|
+| `GET /` | uploader page |
+| `POST /api/jobs` | multipart image upload → `202 {id}` |
+| `GET /api/jobs/{id}/events` | Server-Sent Events: progress, stage, metrics |
+| `GET /api/jobs/{id}/model` | finished STL |
+| `GET /api/jobs/{id}/preview.png` | three-view render |
+| `GET /api/health` | liveness and whether the pipeline binary is present |
+
+Design notes: jobs run **one at a time** — TripoSR loads a ~1.5 GB model onto the
+GPU per invocation, so parallel jobs would thrash memory rather than speed up.
+Uploads are capped (`TRIPOSR_MAX_UPLOAD_MB`, default 20) and sniffed by magic
+number, so a renamed binary is rejected before it reaches the pipeline. Jobs and
+their files expire after `TRIPOSR_JOB_TTL_MIN` (default 120).
+
+```bash
+python -m pytest server/tests -q      # 11 tests, ~3 s, no GPU
 ```
 
 ## What it does, stage by stage
@@ -127,6 +196,7 @@ CONDA_PREFIX_DIR=/opt/conda/envs/triposr triposr photo.jpg
 | `ModuleNotFoundError: No module named 'torchmcubes'` | It has no PyPI wheel. Build it: `pip install "git+https://github.com/tatsy/torchmcubes.git"` (needs cmake + Xcode CLT) |
 | `triposr: command not found` | `bin` isn't on `PATH`; check for a space in the exported path |
 | `UnidentifiedImageError` | Unsupported format (HEIC/RAW). Convert to PNG/JPEG first |
+| `UnavailableInvalidChannel: HTTP 403` | conda mirror refusing the host's IP (common on AutoDL). `./setup.sh --venv` |
 | Hangs or OOM on batch | Each image runs in its own process on purpose; lower `--mc-resolution`/`--chunk-size` |
 
 ## Licences and attribution
