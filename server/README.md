@@ -71,6 +71,24 @@ Errors are JSON `{"detail": "..."}`:
 | 413 | upload over 200 MB (`PRINT_MAX_UPLOAD_MB`) |
 | 422 | invalid field value, or a file that does not parse or reconstruct into a mesh |
 
+### Streamed progress
+
+Send `Accept: application/x-ndjson` to get progress instead of waiting on a bare STL. Auth and
+validation errors (400/401/413/415) are still plain JSON errors. Otherwise the response is
+`200 application/x-ndjson`, one JSON object per line, flushed as it goes:
+
+```
+{"type":"progress","stage":"received","progress":0.02,"message":"Upload received","elapsed_s":0.0}
+{"type":"progress","stage":"reconstruct","progress":0.21,"message":"Reconstructing the shape","elapsed_s":6.1}
+...
+{"type":"done","progress":1.0,"filename":"mug.stl","report":{...X-Print-Report...},"stl_base64":"...","elapsed_s":41.8}
+```
+
+- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`. A mesh upload goes straight from `received` to `repair`.
+- The current stage repeats every 2 s as a heartbeat. Its `progress` creeps toward the next stage's start and never reaches it.
+- The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either is a failure.
+- Nothing arrives while Modal cold-starts the GPU container (up to about 4 minutes). The first line comes as soon as it is up.
+
 ## `GET /api/health`
 
 `{"status": "ok"}` (more fields locally), no auth.

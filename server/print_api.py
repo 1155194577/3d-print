@@ -6,6 +6,7 @@ TripoSR loaded in-process, which is what a serverless GPU container wants.
 """
 
 import hmac
+import math
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ import tempfile
 import threading
 
 from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRIPOSR_DIR = os.path.join(ROOT, "research", "triposr")
@@ -70,7 +71,8 @@ class PhotoReconstructor:
             return np.asarray(rembg.remove(img, session=self.rembg_session, only_mask=True))
 
     def __call__(self, image_path, out_path, mc_resolution=256, foreground_ratio=0.85,
-                 quarter_turns=None):
+                 quarter_turns=None, progress=None):
+        progress = progress or (lambda *a: None)
         import numpy as np
         import torch
         from PIL import Image, ImageOps
@@ -83,13 +85,16 @@ class PhotoReconstructor:
                 image = ImageOps.exif_transpose(Image.open(image_path))
             else:  # sensor-orientation frame: turn it upright from gravity
                 image = Image.open(image_path).convert("RGB").rotate(90 * quarter_turns, expand=True)
+            progress("background")
             image = remove_background(image, self.rembg_session)
             image = resize_foreground(image, foreground_ratio)
             arr = np.array(image).astype(np.float32) / 255.0
             arr = arr[:, :, :3] * arr[:, :, 3:4] + (1 - arr[:, :, 3:4]) * 0.5
             image = Image.fromarray((arr * 255.0).astype(np.uint8))
             with torch.no_grad():
+                progress("reconstruct")
                 codes = self.model([image], device=self.device)
+                progress("mesh")
                 meshes = self.model.extract_mesh(codes, True, resolution=mc_resolution)
             meshes[0].export(out_path)
 
@@ -179,6 +184,7 @@ def print_stl(
     image_orientation: int = Form(1),
     object_points: str | None = Form(None, description="[[u, v], ...] taps on the object, photo px"),
     authorization: str | None = Header(None),
+    accept: str | None = Header(None),
 ):
     _check_auth(authorization)
     if (mesh is None) == (photo is None):
@@ -195,15 +201,13 @@ def print_stl(
 
     workdir = tempfile.mkdtemp(prefix="print_")
     try:
+        frame = None
         if mesh is not None:
             src = _save_upload(mesh, MESH_EXTS, workdir, "mesh")
             stem = mesh.filename
-            kwargs = dict(units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis)
         else:
-            img = _save_upload(photo, PHOTO_EXTS, workdir, "photo")
+            src = _save_upload(photo, PHOTO_EXTS, workdir, "photo")
             stem = photo.filename
-            src = os.path.join(workdir, "raw.obj")
-            frame = None
             if depth is not None:
                 dpath = _save_upload(depth, DEPTH_EXTS, workdir, "depth")
                 cpath = (_save_upload(depth_confidence, CONFIDENCE_EXTS, workdir, "confidence")
@@ -214,44 +218,87 @@ def print_stl(
                         camera_transform, image_orientation, object_points)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc))
-            try:
-                mask = None
-                if frame is None:
-                    reconstruct_photo(img, src)
-                else:
-                    turns = depth_fusion.upright_turns(frame.up_camera())
-                    reconstruct_photo(img, src, quarter_turns=turns)
-                    mask = reconstruct_photo.foreground_mask(img)
-            except Exception as exc:
-                raise HTTPException(422, f"could not reconstruct the photo: {exc}")
-            kwargs = {}
-            if frame is not None:
-                import trimesh
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
 
-                try:
-                    fused, fusion = depth_fusion.fuse(trimesh.load(src, force="mesh"), frame, mask)
-                    src = os.path.join(workdir, "fused.ply")
-                    fused.export(src)
-                    kwargs = dict(units_to_mm=1000.0, up_axis="z")
-                    height = None
-                except depth_fusion.FusionError as exc:
-                    fusion = {"skipped": str(exc)}
-        try:
-            out, report = img2mesh.prepare_mesh(
-                src, height=height, fit_bed=bed, base_plate=base_plate,
-                base_thickness=base_thickness, **kwargs)
-        except SystemExit as exc:
-            raise HTTPException(422, str(exc))
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(422, f"could not process the mesh: {exc}")
-        body = out.export(file_type="stl")
+    name = os.path.splitext(os.path.basename(stem or "model"))[0] or "model"
+    job = dict(src=src, is_mesh=mesh is not None, frame=frame, height=height, bed=bed,
+               base_plate=base_plate, base_thickness=base_thickness,
+               units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir)
+
+    if "application/x-ndjson" in (accept or ""):
+        return StreamingResponse(_stream(job, name), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    try:
+        body, summary = _make_stl(job, lambda *a: None)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+    return Response(body, media_type="model/stl", headers={
+        "Content-Disposition": f'attachment; filename="{name}.stl"',
+        "X-Print-Report": json.dumps(summary, ensure_ascii=True),
+        "Access-Control-Expose-Headers": "X-Print-Report, Content-Disposition",
+    })
+
+
+# stage -> (progress when it starts, message); the order is the order they run in
+STAGES = {
+    "received": (0.02, "Upload received"),
+    "background": (0.08, "Removing the background"),
+    "reconstruct": (0.15, "Reconstructing the shape"),
+    "mesh": (0.45, "Extracting the mesh"),
+    "fuse": (0.60, "Fitting to the LiDAR depth"),
+    "repair": (0.75, "Repairing and adding the base"),
+    "export": (0.92, "Writing the STL"),
+}
+HEARTBEAT_S = 2.0
+
+
+def _make_stl(job, progress):
+    """The slow part of /print. Returns (stl bytes, report); raises HTTPException."""
+    src, frame, height = job["src"], job["frame"], job["height"]
+    fusion = None
+    if job["is_mesh"]:
+        kwargs = dict(units_to_mm=job["units_to_mm"], up_axis=job["up_axis"])
+    else:
+        img, src = src, os.path.join(job["workdir"], "raw.obj")
+        try:
+            mask = None
+            if frame is None:
+                reconstruct_photo(img, src, progress=progress)
+            else:
+                turns = depth_fusion.upright_turns(frame.up_camera())
+                reconstruct_photo(img, src, quarter_turns=turns, progress=progress)
+                progress("fuse")
+                mask = reconstruct_photo.foreground_mask(img)
+        except Exception as exc:
+            raise HTTPException(422, f"could not reconstruct the photo: {exc}")
+        kwargs = {}
+        if frame is not None:
+            import trimesh
+
+            try:
+                fused, fusion = depth_fusion.fuse(trimesh.load(src, force="mesh"), frame, mask)
+                src = os.path.join(job["workdir"], "fused.ply")
+                fused.export(src)
+                kwargs = dict(units_to_mm=1000.0, up_axis="z")
+                height = None
+            except depth_fusion.FusionError as exc:
+                fusion = {"skipped": str(exc)}
+    progress("repair")
+    try:
+        out, report = img2mesh.prepare_mesh(
+            src, height=height, fit_bed=job["bed"], base_plate=job["base_plate"],
+            base_thickness=job["base_thickness"], **kwargs)
+    except SystemExit as exc:
+        raise HTTPException(422, str(exc))
+    except Exception as exc:
+        raise HTTPException(422, f"could not process the mesh: {exc}")
+    progress("export")
+    body = out.export(file_type="stl")
 
     ex = report["extents"]
-    summary = {
+    return body, {
         "extents_mm": [round(float(v), 1) for v in ex],
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),
@@ -259,9 +306,60 @@ def print_stl(
         "volume_cm3": round(report["volume_cm3"], 1) if report["volume_cm3"] else None,
         "scale": report["scale_note"],
     }
-    name = os.path.splitext(os.path.basename(stem or "model"))[0] or "model"
-    return Response(body, media_type="model/stl", headers={
-        "Content-Disposition": f'attachment; filename="{name}.stl"',
-        "X-Print-Report": json.dumps(summary, ensure_ascii=True),
-        "Access-Control-Expose-Headers": "X-Print-Report, Content-Disposition",
-    })
+
+
+def _stream(job, name):
+    """NDJSON: progress lines (and a heartbeat every HEARTBEAT_S), then done or error."""
+    import base64
+    import queue
+    import time
+
+    events = queue.Queue()
+    t0 = time.monotonic()
+    order = list(STAGES)
+
+    def work():
+        try:
+            body, summary = _make_stl(job, lambda stage: events.put(("stage", stage)))
+            events.put(("done", (body, summary)))
+        except HTTPException as exc:
+            events.put(("error", (exc.status_code, exc.detail)))
+        except Exception as exc:  # a bug, not the client's fault
+            events.put(("error", (500, f"{type(exc).__name__}: {exc}")))
+        finally:
+            shutil.rmtree(job["workdir"], ignore_errors=True)
+
+    def line(obj):
+        return (json.dumps(obj, ensure_ascii=True) + "\n").encode()
+
+    def progress_line(stage, since):
+        start, message = STAGES[stage]
+        later = [STAGES[s][0] for s in order[order.index(stage) + 1:]] + [1.0]
+        # creep toward the next stage so the bar keeps moving, never reaching it
+        frac = start + 0.9 * (later[0] - start) * (1 - math.exp(-(time.monotonic() - since) / 20))
+        return line({"type": "progress", "stage": stage, "progress": round(frac, 3),
+                     "message": message, "elapsed_s": round(time.monotonic() - t0, 1)})
+
+    threading.Thread(target=work, daemon=True).start()
+    stage, since = "received", time.monotonic()
+    yield progress_line(stage, since)
+    while True:
+        try:
+            kind, value = events.get(timeout=HEARTBEAT_S)
+        except queue.Empty:
+            yield progress_line(stage, since)
+            continue
+        if kind == "stage":
+            stage, since = value, time.monotonic()
+            yield progress_line(stage, since)
+        elif kind == "done":
+            body, summary = value
+            yield line({"type": "done", "progress": 1.0, "report": summary,
+                        "filename": f"{name}.stl", "elapsed_s": round(time.monotonic() - t0, 1),
+                        "stl_base64": base64.b64encode(body).decode()})
+            return
+        else:
+            status, detail = value
+            yield line({"type": "error", "status": status, "detail": detail,
+                        "elapsed_s": round(time.monotonic() - t0, 1)})
+            return
