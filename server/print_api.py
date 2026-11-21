@@ -243,6 +243,8 @@ def print_stl(
                     height = None
                 except depth_fusion.FusionError as exc:
                     fusion = {"skipped": str(exc)}
+                    if camera_transform:
+                        gravity = (frame.up_camera(), turns)
             if not fusion or "skipped" in fusion:
                 kwargs.update(photo_level=True, gravity=gravity)
         try:
