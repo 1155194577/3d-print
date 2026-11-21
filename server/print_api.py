@@ -231,6 +231,7 @@ def print_upload_urls(payload: object = Body(...), authorization: str | None = H
 @router.post("/print", response_class=Response,
           responses={200: {"content": {"model/stl": {}}}})
 def print_stl(
+    request: Request,
     mesh: UploadFile | None = File(None, description="LiDAR scan: usdz/obj/ply/glb/stl"),
     photo: UploadFile | None = File(None, description="photo: jpg/png/webp"),
     mode: str = Form("object", pattern="^(object|face)$"),
@@ -256,6 +257,9 @@ def print_stl(
     accept: str | None = Header(None),
 ):
     _check_auth(authorization)
+    join_id = getattr(request.state, "print_join_job_id", None)
+    if join_id is not None:
+        return _job_response(join_id, accept)
     if (mesh is None) == (photo is None):
         raise HTTPException(400, "send exactly one of `mesh` or `photo`")
     if mode == "face" and photo is None:
@@ -327,6 +331,10 @@ def print_stl(
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
+    return _job_response(job_id, accept)
+
+
+def _job_response(job_id, accept):
     if _wants_ndjson(accept):
         return _ndjson(_events(job_id, accepted=True, with_stl=True))
     state = print_jobs.get_state(job_id)
