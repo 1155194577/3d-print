@@ -123,6 +123,7 @@ def test_face_photo_fallback(client, monkeypatch, bad_depth, height):
         data.update(depth_width=depth.shape[1], depth_height=depth.shape[0], intrinsics=json.dumps(intr))
     stl, report = result(client.post("/print", data=data, files=files))
     assert stl.is_watertight
+    assert "level" not in report
     assert stl.extents[2] == pytest.approx((height or 100) + 2.5, abs=0.5)
     assert stl.extents[0] < (height or 100) * 0.85
     if bad_depth:

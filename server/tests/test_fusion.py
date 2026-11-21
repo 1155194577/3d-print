@@ -148,7 +148,28 @@ def test_unusable_depth_falls_back_to_height(client, monkeypatch):
     files, data = frame_request(np.full((H, W), np.nan), M, height_mm="80")
     stl, rep = result(client.post("/print", files=files, data=data))
     assert "skipped" in rep["fusion"]
+    assert rep["level"]["source"] == "gravity"
     assert stl.extents[2] == pytest.approx(80, abs=0.5)
+
+
+def test_skipped_fusion_preserves_sensor_gravity(client, monkeypatch):
+    M = camera_to_world()
+    roll = trimesh.transformations.rotation_matrix(np.pi / 2, [0, 0, 1])
+    M = M @ roll
+    depth, mask = render(M)
+    fake = FakeTripoSR(mask)
+    monkeypatch.setattr(api, "reconstruct_photo", fake)
+
+    def skip(*args):
+        raise api.depth_fusion.FusionError("forced skip")
+
+    monkeypatch.setattr(api.depth_fusion, "fuse", skip)
+    files, data = frame_request(depth, M, height_mm="80")
+    _, rep = result(client.post("/print", files=files, data=data))
+    assert fake.turns == api.depth_fusion.upright_turns(
+        api.depth_fusion.CV_FROM_ARKIT @ (M[:3, :3].T @ [0., 1., 0.]))
+    assert rep["fusion"] == {"skipped": "forced skip"}
+    assert rep["level"]["source"] == "gravity"
 
 
 @pytest.mark.parametrize("change, msg", [

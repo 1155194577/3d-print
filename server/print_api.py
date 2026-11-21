@@ -27,6 +27,7 @@ TRIPOSR_DIR = os.path.join(ROOT, "research", "triposr")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import depth_fusion  # noqa: E402
 import img2mesh  # noqa: E402
+import photo_level  # noqa: E402
 import printability  # noqa: E402
 
 from server import print_jobs  # noqa: E402
@@ -236,12 +237,18 @@ def print_stl(
     workdir = tempfile.mkdtemp(prefix="print_")
     try:
         frame = None
+        gravity = None
         if mesh is not None:
             src = _save_upload(mesh, MESH_EXTS, workdir, "mesh")
             stem = mesh.filename
         else:
             src = _save_upload(photo, PHOTO_EXTS, workdir, "photo")
             stem = photo.filename
+            if mode == "object" and camera_transform and depth is None:
+                try:
+                    gravity = photo_level.photo_up(camera_transform, image_orientation or 1)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc))
             if depth is not None:
                 dpath = _save_upload(depth, DEPTH_EXTS, workdir, "depth")
                 cpath = (_save_upload(depth_confidence, CONFIDENCE_EXTS, workdir, "confidence")
@@ -257,7 +264,7 @@ def print_stl(
         shutil.rmtree(workdir, ignore_errors=True)
         raise
     name = os.path.splitext(os.path.basename(stem or "model"))[0] or "model"
-    job = dict(src=src, is_mesh=mesh is not None, frame=frame, height=height, bed=bed,
+    job = dict(src=src, is_mesh=mesh is not None, frame=frame, gravity=gravity, height=height, bed=bed,
                base_plate=base_plate, base_thickness=base_thickness,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
                mode=mode, face_to_world=face_to_world, image_orientation=image_orientation)
@@ -350,6 +357,7 @@ HEARTBEAT_S = 2.0
 def _make_stl(job, progress):
     """The slow part of /print. Returns (stl bytes, report); raises HTTPException."""
     src, frame, height = job["src"], job["frame"], job["height"]
+    gravity = job["gravity"]
     mode = job["mode"]
     fusion = None
     if job["is_mesh"]:
@@ -360,7 +368,7 @@ def _make_stl(job, progress):
             mask = None
             if frame is None:
                 orientation = job["image_orientation"]
-                turns = {1: 0, 3: 2, 6: 3, 8: 1}.get(orientation)
+                turns = gravity[1] if gravity else {1: 0, 3: 2, 6: 3, 8: 1}.get(orientation)
                 reconstruct_photo(img, src, quarter_turns=turns, progress=progress)
             else:
                 photo_up = frame.depth_to_photo[:3, :3] @ frame.up_camera()
@@ -387,6 +395,10 @@ def _make_stl(job, progress):
                     height = None
             except depth_fusion.FusionError as exc:
                 fusion = {"skipped": str(exc)}
+                if frame.camera_to_world is not None:
+                    gravity = (photo_up, turns)
+        if mode == "object" and (not fusion or "skipped" in fusion):
+            kwargs.update(photo_level=True, gravity=gravity)
         if mode == "face" and (frame is None or "skipped" in (fusion or {})):
             import trimesh
 
@@ -415,6 +427,7 @@ def _make_stl(job, progress):
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),
         "faces": int(report["faces"]),
+        **({"level": report["level"]} if "level" in report else {}),
         "volume_cm3": round(report["volume_cm3"], 1) if report["volume_cm3"] else None,
         "printability": check,
         "scale": report["scale_note"],
