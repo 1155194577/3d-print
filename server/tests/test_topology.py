@@ -75,6 +75,29 @@ def test_solver_failure_is_unchanged(monkeypatch):
     assert report == {"skipped": "optimisation failed: solver unavailable"}
 
 
+def test_nonconverged_solver_with_large_residual_is_unchanged(monkeypatch):
+    mesh = trimesh.creation.box(extents=[40, 40, 60])
+    monkeypatch.setattr(topology, "cg", lambda matrix, force, **kwargs: (np.zeros_like(force), 250))
+    result, report = topology.optimise(mesh)
+    assert result is mesh
+    assert report == {"skipped": "optimisation failed: elasticity solve residual 1 exceeds tolerance"}
+
+
+def test_large_sample_accepts_small_residual_despite_iteration_limit(monkeypatch):
+    original = topology.cg
+    residuals = []
+    def limited(matrix, force, **kwargs):
+        displacement, _ = original(matrix, force, **kwargs)
+        residuals.append(np.linalg.norm(matrix @ displacement - force) / np.linalg.norm(force))
+        return displacement, 250
+    monkeypatch.setattr(topology, "cg", limited)
+    mesh = trimesh.creation.box(extents=[120, 120, 180])
+    result, report = topology.optimise(mesh)
+    assert "skipped" not in report, report
+    assert len(residuals) == 30 and max(residuals) <= 1e-2
+    assert result.is_volume and report["volume_saved_pct"] >= 5
+
+
 @pytest.mark.parametrize("force_void", [False, True])
 def test_subvoxel_bore_preserves_original_surface_clearance(monkeypatch, force_void):
     block = trimesh.creation.box(extents=[40, 40, 60])

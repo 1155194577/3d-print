@@ -88,6 +88,9 @@ def _densities(solid, passive, iterations, fraction, deadline):
                                   rtol=2e-3, atol=0, maxiter=250, callback=check_deadline)
         if status < 0 or not np.isfinite(displacement).all():
             raise RuntimeError("elasticity solve failed")
+        residual = float(np.linalg.norm(matrix @ displacement - force) / np.linalg.norm(force))
+        if not np.isfinite(residual) or residual > 1e-2:
+            raise RuntimeError(f"elasticity solve residual {residual:.3g} exceeds tolerance")
         full = np.zeros(count, dtype=np.float32)
         full[free] = displacement
         element_u = full[dofs]
@@ -118,7 +121,7 @@ def _surface_samples(mesh, spacing, with_faces=False):
     triangles = mesh.triangles
     edges = triangles - np.roll(triangles, 1, axis=1)
     divisions = np.maximum(1, np.ceil(np.linalg.norm(edges, axis=2).max(axis=1) / spacing)).astype(int)
-    if np.sum((divisions + 1) * (divisions + 2) // 2) > 750000:
+    if np.sum((divisions + 1) * (divisions + 2) // 2) > 1000000:
         raise RuntimeError("surface clearance sample budget exceeded")
     samples = []
     for triangle, count in zip(triangles, divisions):
@@ -142,7 +145,7 @@ def _clear_cavities(cavity, original, shell_mm):
     safe = []
     for component in cavity.split(only_watertight=False):
         points = _surface_samples(component, cavity_spacing)
-        distances, _ = tree.query(points)
+        distances, _ = tree.query(points, distance_upper_bound=clearance + spacing)
         valid = True
         for point in points[distances < clearance + spacing]:
             neighbors = tree.query_ball_point(point, clearance + spacing)
