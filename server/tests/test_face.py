@@ -1,6 +1,7 @@
 """Synthetic front TrueDepth busts and independently calibrated depth cameras."""
 
 import json
+import io
 
 import numpy as np
 import pytest
@@ -9,6 +10,7 @@ import trimesh
 from server import print_api as api
 from server.tests.test_fusion import client, photo_bytes, result
 from depth_fusion import Frame, _depth_mask, backproject
+from PIL import Image
 
 
 def head_mesh():
@@ -58,8 +60,10 @@ def face_frame():
 class FakeFace:
     def __init__(self, mesh, mask):
         self.mesh, self.mask = mesh, mask
+        self.turns = "unset"
 
     def __call__(self, image_path, out_path, quarter_turns=None, progress=None):
+        self.turns = quarter_turns
         mesh = self.mesh.copy()
         mesh.apply_scale(3.7)
         mesh.apply_translation([0.1, -0.2, 0.3])
@@ -196,8 +200,6 @@ def test_calibration_dimensions_bounded(tmp_path, field, separate_depth):
 
 
 def test_calibrated_mask_uses_native_resolution(tmp_path, monkeypatch):
-    from PIL import Image
-
     path = tmp_path / "depth.f32"
     path.write_bytes(np.ones((8, 8), dtype="<f4").tobytes())
     photo = dict(fx=16000, fy=16000, cx=8000, cy=8000, width=16000, height=16000)
@@ -256,3 +258,50 @@ def test_calibrated_mask_keeps_nearby_objects_separate(tmp_path):
     mask = expected.copy()
     mask[8:40, 33:56] = True
     assert np.array_equal(_depth_mask(frame, mask), expected)
+
+
+@pytest.mark.parametrize("with_depth", [False, True])
+@pytest.mark.parametrize("vertices_as_file", [False, True])
+def test_ios_face_capture_payload(client, monkeypatch, with_depth, vertices_as_file):
+    mesh, depth, mask, intr = face_frame()
+    depth, mask = np.rot90(depth).copy(), np.rot90(mask).copy()
+    intr.update(cx=96, cy=80, width=192, height=160)
+    fake = FakeFace(mesh, mask)
+    monkeypatch.setattr(api, "reconstruct_photo", fake)
+    camera = np.eye(4)
+    camera[:3, :3] = trimesh.transformations.rotation_matrix(-np.pi / 2, [0, 0, 1])[:3, :3]
+    anchor = np.eye(4)
+    anchor[:3, 3] = camera[:3, :3] @ [0, 0, -0.4]
+    data = dict(mode="face", image_orientation="6", intrinsics=json.dumps(intr),
+                camera_transform=json.dumps(camera.T.ravel().tolist()),
+                face_transform=json.dumps(anchor.T.ravel().tolist()), height_mm="90")
+    photo = io.BytesIO()
+    Image.new("RGB", (intr["width"], intr["height"])).save(photo, format="JPEG")
+    files = {"photo": ("face.jpg", photo.getvalue())}
+    vertices = np.zeros((4, 3), dtype="<f4").tobytes()
+    if vertices_as_file:
+        files["face_vertices"] = ("face.f32", vertices)
+        files["face_vertex_count"] = ("count.txt", b"4")
+    else:
+        data.update(face_vertices=vertices.decode("ascii"), face_vertex_count="4")
+    if with_depth:
+        files["depth"] = ("face.f32", depth.tobytes())
+        data.update(depth_width=depth.shape[1], depth_height=depth.shape[0],
+                    depth_intrinsics=json.dumps(intr),
+                    depth_extrinsics=json.dumps(np.eye(4).T.ravel().tolist()))
+    stl, report = result(client.post("/print", data=data, files=files))
+    assert report["mode"] == "face"
+    assert stl.is_watertight
+    assert stl.extents[2] == pytest.approx(92.5, abs=0.5)
+    assert fake.turns == 3
+
+
+@pytest.mark.parametrize("orientation,turns", [(None, None), ("1", 0), ("6", 3)])
+def test_photo_only_orientation_preserves_exif_default(client, monkeypatch, orientation, turns):
+    mesh, _, mask, _ = face_frame()
+    fake = FakeFace(mesh, mask)
+    monkeypatch.setattr(api, "reconstruct_photo", fake)
+    data = {} if orientation is None else {"image_orientation": orientation}
+    response = client.post("/print", data=data, files={"photo": ("photo.png", photo_bytes())})
+    assert response.status_code == 200
+    assert fake.turns == turns

@@ -76,6 +76,13 @@ Send `ARCamera.intrinsics` with the **capturedImage** width and height, and
 `ARCamera.transform` as `camera_transform`. The optional `face_transform` is
 `ARFaceAnchor.transform`, also column-major (16 finite floats).
 
+Without depth, send `image_orientation` (1, 3, 6 or 8) to turn a sensor-orientation
+JPEG upright before reconstruction, even when it has no EXIF tag. This also works
+in object mode. If omitted, photo-only requests retain EXIF-based orientation;
+an explicit 1 leaves the image as stored. Optional `face_vertices` (float32 LE XYZ)
+and `face_vertex_count` capture metadata are accepted and ignored, whether sent as
+file parts or form fields.
+
 Face fusion uses gravity, not a floor plane, rejects points more than 25 cm behind
 the nearest foreground point, and cuts 12 cm below the face anchor's head centre.
 Without an anchor it cuts 24 cm below the foreground top, clamped to its lowest

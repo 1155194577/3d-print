@@ -192,7 +192,7 @@ def print_stl(
     depth_intrinsics: str | None = Form(None, description="depth camera intrinsics JSON"),
     depth_extrinsics: str | None = Form(None, description="16 floats, column-major depth-to-photo, OpenCV axes"),
     camera_transform: str | None = Form(None, description="16 floats, column-major camera-to-world"),
-    image_orientation: int = Form(1),
+    image_orientation: int | None = Form(None),
     object_points: str | None = Form(None, description="[[u, v], ...] taps on the object, photo px"),
     job_id: str | None = Form(None, description="client-chosen UUID; a retry with it joins the job"),
     authorization: str | None = Header(None),
@@ -217,6 +217,8 @@ def print_stl(
     bed = _parse_bed(fit_bed)
     if depth is not None and photo is None:
         raise HTTPException(400, "`depth` goes with `photo`")
+    if image_orientation is not None and image_orientation not in (1, 3, 6, 8):
+        raise HTTPException(400, "image_orientation must be 1, 3, 6 or 8")
     try:
         job_id = str(uuid.UUID(job_id)) if job_id else str(uuid.uuid4())
     except ValueError:
@@ -243,7 +245,7 @@ def print_stl(
                 try:
                     frame = depth_fusion.Frame.load(
                         dpath, depth_width, depth_height, cpath, intrinsics,
-                        camera_transform, image_orientation, object_points,
+                        camera_transform, image_orientation or 1, object_points,
                         depth_intrinsics, depth_extrinsics)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc))
@@ -254,7 +256,7 @@ def print_stl(
     job = dict(src=src, is_mesh=mesh is not None, frame=frame, height=height, bed=bed,
                base_plate=base_plate, base_thickness=base_thickness,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
-               mode=mode, face_to_world=face_to_world)
+               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation)
 
     if _wants_ndjson(accept):
         def run(progress):
@@ -352,7 +354,9 @@ def _make_stl(job, progress):
         try:
             mask = None
             if frame is None:
-                reconstruct_photo(img, src, progress=progress)
+                orientation = job["image_orientation"]
+                turns = {1: 0, 3: 2, 6: 3, 8: 1}.get(orientation)
+                reconstruct_photo(img, src, quarter_turns=turns, progress=progress)
             else:
                 photo_up = frame.depth_to_photo[:3, :3] @ frame.up_camera()
                 turns = depth_fusion.upright_turns(photo_up)
