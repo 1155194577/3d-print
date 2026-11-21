@@ -27,6 +27,7 @@ TRIPOSR_DIR = os.path.join(ROOT, "research", "triposr")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import depth_fusion  # noqa: E402
 import img2mesh  # noqa: E402
+import printability  # noqa: E402
 
 from server import print_jobs  # noqa: E402
 
@@ -318,7 +319,8 @@ STAGES = {
     "mesh": (0.45, "Extracting the mesh"),
     "fuse": (0.60, "Fitting to the LiDAR depth"),
     "repair": (0.75, "Repairing and adding the base"),
-    "export": (0.92, "Writing the STL"),
+    "export": (0.88, "Writing the STL"),
+    "check": (0.94, "Checking it will print"),
 }
 HEARTBEAT_S = 2.0
 
@@ -365,6 +367,8 @@ def _make_stl(job, progress):
         raise HTTPException(422, f"could not process the mesh: {exc}")
     progress("export")
     body = out.export(file_type="stl")
+    progress("check")
+    body, check = _check_printable(body, job["bed"])
 
     ex = report["extents"]
     return body, {
@@ -373,8 +377,29 @@ def _make_stl(job, progress):
         **({"fusion": fusion} if fusion else {}),
         "faces": int(report["faces"]),
         "volume_cm3": round(report["volume_cm3"], 1) if report["volume_cm3"] else None,
+        "printability": check,
         "scale": report["scale_note"],
     }
+
+
+def _check_printable(body, bed):
+    """Check the STL as written; repair once if needed. Returns (stl, check) or raises 422."""
+    import io
+
+    import trimesh
+
+    def load(data):
+        return trimesh.load(io.BytesIO(data), file_type="stl", force="mesh")
+
+    check = printability.check(load(body), bed)
+    if check["repairable"]:
+        fixed = printability.fix(load(body)).export(file_type="stl")
+        recheck = printability.check(load(fixed), bed)
+        if recheck["printable"] or not check["printable"]:
+            body, check = fixed, {**recheck, "repaired": check["errors"] + check["warnings"]}
+    if not check["printable"]:
+        raise HTTPException(422, "the model can't be printed: " + "; ".join(check["errors"]))
+    return body, check
 
 
 POLL_S = 0.5

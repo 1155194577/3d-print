@@ -60,6 +60,11 @@ photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
 - `X-Print-Report` header, JSON:
   `{"extents_mm": [x, y, z], "watertight": true, "faces": 23898, "volume_cm3": 249.0, "scale": "height → 122.5 mm"}`.
   With depth it adds `"fusion": {"lidar_points": 2380, "icp_rmse_mm": 0.8, "scale": 0.37, "seen_vertices": 0.32, "floor": "camera gravity + plane"}`
+- Every STL is checked for printing (`tools/printability.py`) and the report adds `"printability"`:
+  `{"printable": true, "errors": [], "warnings": ["38% of the surface overhangs more than 45°: print with supports"], "open_edges": 0, "nonmanifold_edges": 0, "parts": 1, "base_contact_mm2": 1810.0, "overhang_pct": 38.2, "thin_wall_pct": 0.4, "min_wall_mm": 1.9, "solid_mass_g": 309.0}`.
+  Warnings (overhangs, walls under 0.8 mm, floating parts, a base that may tip, bigger than a 220×220×250 bed) never block the STL; show them to the user.
+  Holes, bad winding and floating parts get one repair pass first, listed in `"repaired"`.
+  Only an STL that is still not watertight after that, or doesn't fit `fit_bed`, is refused with 422.
 
 Errors are JSON `{"detail": "..."}`:
 
@@ -69,7 +74,7 @@ Errors are JSON `{"detail": "..."}`:
 | 401 | missing or wrong bearer token |
 | 415 | unsupported file extension (e.g. `.heic`, `.fbx`) |
 | 413 | upload over 200 MB (`PRINT_MAX_UPLOAD_MB`) |
-| 422 | invalid field value, or a file that does not parse or reconstruct into a mesh |
+| 422 | invalid field value, a file that does not parse or reconstruct into a mesh, or an STL that can't be printed (still not watertight after repair, or doesn't fit `fit_bed`) |
 
 ### Streamed progress and print jobs
 
@@ -86,7 +91,7 @@ flushed as it goes:
 {"type":"done","progress":1.0,"filename":"mug.stl","report":{...X-Print-Report...},"stl_base64":"...","elapsed_s":41.8}
 ```
 
-- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
+- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`, `check`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
 - The current stage repeats every 2 s as a heartbeat. Its `progress` creeps toward the next stage's start and never reaches it.
 - The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either means the connection dropped, not that the print failed: resume it.
 - Optional form field `job_id` (a UUID the app picks). A retry with the same id joins that job instead of starting a second print.
