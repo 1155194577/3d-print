@@ -165,7 +165,8 @@ flushed as it goes:
 ```
 
 - Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`, `check`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
-- The current stage repeats about every 2 s as a heartbeat, including during slow job-store reads. Its `progress` creeps toward the next stage's start and never reaches it. Mesh work runs in a separate, persistent spawned process so native fusion/repair cannot hold the HTTP interpreter's GIL. The worker retains TripoSR between jobs and processes one job at a time.
+- The current stage repeats about every 2 s as a heartbeat, including during slow job-store reads. Its `progress` creeps toward the next stage's start and never reaches it. On Modal an always-warm CPU frontend accepts and validates uploads without waiting for a GPU, then dispatches each print to an L4 function. The GPU container retains TripoSR between jobs; its GIL cannot block the frontend. Local/dev uses an in-process runner.
+- Modal jobs start at `queued` ("Waiting for a print server GPU"). They can wait up to 10 minutes for scheduling before becoming an error; the normal 90-second worker-staleness rule applies only after execution starts. Both streamed and synchronous requests use the same shared job state and retry/join semantics.
 - The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either means the connection dropped, not that the print failed: resume it.
 - Optional form field `job_id` (a UUID the app picks). A retry with the same id joins that job instead of starting a second print.
 

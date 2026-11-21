@@ -11,6 +11,7 @@ import time
 TTL_S = 24 * 3600
 TOUCH_S = 5.0  # a running job rewrites its state this often...
 STALE_S = 90.0  # ...so one silent for this long died with its container
+QUEUED_STALE_S = 10 * 60.0
 CHUNK = 32 * 1024 * 1024  # modal.Dict values are capped at 100 MiB, so big STLs go in pieces
 
 
@@ -64,26 +65,39 @@ def get_state(job_id):
     now = time.time()
     if state is None or now - state["created"] > TTL_S:
         return None
-    if state["type"] == "progress" and now - state["updated"] > STALE_S:
+    queued = state.get("stage") == "queued"
+    if state["type"] == "progress" and now - state["updated"] > (QUEUED_STALE_S if queued else STALE_S):
         state = dict(state, type="error", status=500,
-                     detail="the print server restarted during this print; send it again")
+                     detail=("no print server GPU became available within 10 minutes; send it again" if queued
+                             else "the print server restarted during this print; send it again"))
     return state
 
 
-def start(job_id, run, filename):
-    """Start `run(progress) -> (stl bytes, report)` as job `job_id` unless that id exists.
-
-    Returns True if this call started it, False if it joined a job already there.
-    """
+def claim(job_id, filename, stage="received"):
+    """Reserve an id before dispatch; retries join the existing job."""
     now = time.time()
     store.prune(now)
-    state = dict(type="progress", stage="received", history=["received"], since=now, created=now, updated=now,
+    state = dict(type="progress", stage=stage, history=[stage], since=now, created=now, updated=now,
                  filename=filename)
     if not store.put(job_id, state, skip_if_exists=True):
         old = store.get(job_id)
         if old is not None and now - old["created"] <= TTL_S:
             return False
         store.put(job_id, state)  # that id's job expired: start afresh
+    return True
+
+
+def fail(job_id, status, detail):
+    state = store.get(job_id)
+    if state is not None:
+        store.put(job_id, dict(state, type="error", status=status, detail=detail, updated=time.time()))
+
+
+def run_existing(job_id, run):
+    """Execute an already-reserved job in this process and publish its result."""
+    state = get_state(job_id)
+    if state is None or state["type"] != "progress":
+        return
 
     lock = threading.Lock()
 
@@ -96,6 +110,8 @@ def start(job_id, run, filename):
         from fastapi import HTTPException
 
         try:
+            if state["stage"] == "queued":
+                save(stage="received", since=time.time(), history=state["history"] + ["received"])
             body, report = run(lambda stage: save(stage=stage, since=time.time(),
                                                   history=state["history"] + [stage]))
             chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
@@ -107,15 +123,24 @@ def start(job_id, run, filename):
         except Exception as exc:  # a bug, not the client's fault
             save(type="error", status=500, detail=f"{type(exc).__name__}: {exc}")
 
-    def keepalive(worker):
-        while worker.is_alive():
-            worker.join(TOUCH_S)
-            if worker.is_alive():
-                save()
+    finished = threading.Event()
 
-    worker = threading.Thread(target=work, daemon=True)
-    worker.start()
-    threading.Thread(target=keepalive, args=(worker,), daemon=True).start()
+    def keepalive():
+        while not finished.wait(TOUCH_S):
+            save()
+
+    threading.Thread(target=keepalive, daemon=True).start()
+    try:
+        work()
+    finally:
+        finished.set()
+
+
+def start(job_id, run, filename):
+    """Start a local job in a thread; retries join the existing job."""
+    if not claim(job_id, filename):
+        return False
+    threading.Thread(target=run_existing, args=(job_id, run), daemon=True).start()
     return True
 
 
