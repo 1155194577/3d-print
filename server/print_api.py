@@ -228,6 +228,11 @@ def print_upload_urls(payload: object = Body(...), authorization: str | None = H
     return print_uploads.register(payload, MAX_UPLOAD_BYTES)
 
 
+@router.get("/print/uploads/{job_id}")
+def print_upload_preview(job_id: str):
+    return print_uploads.preview(job_id)
+
+
 @router.post("/print", response_class=Response,
           responses={200: {"content": {"model/stl": {}}}})
 def print_stl(
@@ -253,10 +258,13 @@ def print_stl(
     object_points: str | None = Form(None, description="[[u, v], ...] taps on the object, photo px"),
     job_id: str | None = Form(None, description="client-chosen UUID; a retry with it joins the job"),
     uploaded: str | None = Form(None, description="comma-separated names uploaded with /print/uploads"),
+    result: str | None = Form(None, description="url to return an S3 STL download link"),
     authorization: str | None = Header(None),
     accept: str | None = Header(None),
 ):
     _check_auth(authorization)
+    if result is not None and result != "url":
+        raise HTTPException(400, "result must be url when provided")
     join_id = getattr(request.state, "print_join_job_id", None)
     if join_id is not None:
         return _job_response(join_id, accept)
@@ -323,7 +331,7 @@ def print_stl(
     job = dict(src=src, is_mesh=mesh is not None, frame=frame, gravity=gravity, height=height, bed=bed,
                base_plate=base_plate, base_thickness=base_thickness,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
-               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation)
+               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation, result_mode=result)
 
     try:
         if not submit_job(job_id, job, f"{name}.stl"):
@@ -345,6 +353,8 @@ def _job_response(job_id, accept):
         raise HTTPException(404, "the print job expired")
     if state["type"] == "error":
         raise HTTPException(state["status"], state["detail"])
+    if state.get("result_mode") == "url":
+        return JSONResponse(print_uploads.result_payload(state))
     return _stl_response(print_jobs.get_stl(job_id), state["report"], state["filename"])
 
 
@@ -360,7 +370,7 @@ def submit_job(job_id, job, filename):
         finally:
             shutil.rmtree(job["workdir"], ignore_errors=True)
 
-    return print_jobs.start(job_id, run, filename)
+    return print_jobs.start(job_id, run, filename, result_mode=job.get("result_mode"))
 
 
 def _stl_response(body, summary, filename):
@@ -400,6 +410,8 @@ async def print_job(job_id: str, accept: str | None = Header(None)):
     job_id, state = await run_in_threadpool(_job_state, job_id)
     if _wants_ndjson(accept):
         return _ndjson(_events(job_id, accepted=False, with_stl=False))
+    if state["type"] == "done" and state.get("result_mode") == "url":
+        return {"type": "done", **await run_in_threadpool(print_uploads.result_payload, state)}
     return _line(state)
 
 
@@ -413,6 +425,8 @@ async def print_result(job_id: str):
         job_id, state = await run_in_threadpool(_job_state, job_id)
     if state["type"] == "error":
         return JSONResponse({"detail": state["detail"]}, status_code=state["status"])
+    if state.get("result_mode") == "url":
+        return JSONResponse(await run_in_threadpool(print_uploads.result_payload, state))
     body = await run_in_threadpool(print_jobs.get_stl, job_id)
     return _stl_response(body, state["report"], state["filename"])
 
@@ -610,6 +624,15 @@ async def _events(job_id, accepted, with_stl):
         sent = max(sent, len(history) - running)
         line = _line(state)
         if state["type"] == "done":
+            if state.get("result_mode") == "url":
+                async for ready, value in _wait_with_heartbeats(
+                        run_in_threadpool(print_uploads.result_payload, state), last_progress, sent_at):
+                    if not ready:
+                        sent_at = time.monotonic()
+                        yield out(value)
+                    else:
+                        yield out({"type": "done", **value})
+                return
             if with_stl:
                 def encoded_stl():
                     return base64.b64encode(print_jobs.get_stl(job_id)).decode()

@@ -79,7 +79,8 @@ cpu_image = (
 app = modal.App("3d-print", image=cpu_image)
 
 
-@app.function(image=image, gpu="L4", timeout=600, scaledown_window=300)
+@app.function(image=image, gpu="L4", timeout=600, scaledown_window=300,
+              secrets=[modal.Secret.from_name("3d-print-s3")])
 def run_print(job_id, spec):
     import sys
     import tempfile
@@ -139,7 +140,7 @@ def web():
     def submit(job_id, job, filename):
         try:
             spec = print_spec.pack(job)
-            if not print_jobs.claim(job_id, filename, stage="queued"):
+            if not print_jobs.claim(job_id, filename, stage="queued", result_mode=job.get("result_mode")):
                 return False
             try:
                 run_print.spawn(job_id, spec)

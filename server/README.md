@@ -179,8 +179,9 @@ use the same Bearer token):
    Sizes must be positive integers within `PRINT_MAX_UPLOAD_MB` (200 MB by default,
    per file). Invalid names, sizes or UUIDs return 400. The response is
    `{"job_id":"<UUID>","expires_in":900,"uploads":{"photo":{"url":"<presigned URL>","method":"PUT","headers":{"Content-Type":"image/jpeg"}}}}`.
-2. PUT each file to its URL with exactly the returned headers. Content-Type is
-   signed (SigV4). URLs expire after 15 minutes; expired PUTs return S3 HTTP 403.
+2. PUT each file to its URL with exactly the returned headers. Content-Type and
+   the declared Content-Length are signed (SigV4); URLSession sets Content-Length
+   from the body. URLs expire after 15 minutes; expired PUTs return S3 HTTP 403.
    Repeating step 1 with the same job ID refreshes URLs for that job and replaces
    that file's object, rather than allocating another print job.
 3. `POST /print` with form fields `job_id=<returned UUID>`,
@@ -193,11 +194,31 @@ use the same Bearer token):
    and the same name in `uploaded` return 400. Actual file sizes must match their
    declared sizes. Normal NDJSON acceptance/progress/results are unchanged.
 
-Objects are removed after dispatch or validation failure. S3 should also have a
-one-day expiration rule for `uploads/` as a backstop for abandoned uploads and
-late PUTs. Modal's CPU `web` needs secret `3d-print-s3` containing
+`GET /print/uploads/{job_id}` (same Bearer auth) previews the existing registered
+files without requiring ListBucket. It returns
+`{"job_id":"<UUID>","files":{"photo":{"key":"uploads/...","size":12345,"url":"<presigned GET>"}}}`.
+Preview links expire in 3600 seconds. Missing objects are omitted, unknown jobs
+return an empty `files` object, and a bad UUID returns 400.
+
+Add form field `result=url` to step 3 (or a multipart print) to receive the STL
+through S3. The worker saves `results/<job_id>/model.stl` with Content-Type
+`model/stl`. The NDJSON final line is
+`{"type":"done","report":{...},"stl_url":"<presigned GET>","stl_key":"results/<job_id>/model.stl"}`,
+with no base64 STL or trailing bytes. A synchronous request returns JSON with
+`report`, `stl_url`, and `stl_key`. `GET /print/{job_id}` returns that done line
+with a freshly signed 3600-second URL; its NDJSON form and the `/result` route
+also support URL results. The job remembers its original result mode across
+retries, even if a retry omits `result`. Any value other than `url` returns 400.
+Omitting the field preserves the existing STL/base64 responses.
+
+Uploads are retained after dispatch, retry/join and validation failure so they
+remain available for previews. Configure seven-day expiration for both
+`uploads/` and `results/` with
+`python -c 'from server.print_uploads import configure_lifecycle; print(configure_lifecycle())'`.
+The helper merges existing rules and reports AccessDenied without failing.
+Modal's CPU `web` and GPU print worker need secret `3d-print-s3` containing
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `PRINT_S3_BUCKET`;
-the GPU worker does not receive those credentials. Legacy multipart requests
+the worker uses them only to publish URL-mode results. Legacy multipart requests
 continue to work unchanged. For local tests install
 `server/requirements-test.txt` (moto is test-only).
 

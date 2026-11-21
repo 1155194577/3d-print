@@ -73,12 +73,12 @@ def get_state(job_id):
     return state
 
 
-def claim(job_id, filename, stage="received"):
+def claim(job_id, filename, stage="received", result_mode=None):
     """Reserve an id before dispatch; retries join the existing job."""
     now = time.time()
     store.prune(now)
     state = dict(type="progress", stage=stage, history=[stage], since=now, created=now, updated=now,
-                 filename=filename)
+                 filename=filename, result_mode=result_mode)
     if not store.put(job_id, state, skip_if_exists=True):
         old = store.get(job_id)
         if old is not None and now - old["created"] <= TTL_S:
@@ -114,6 +114,14 @@ def run_existing(job_id, run):
                 save(stage="received", since=time.time(), history=state["history"] + ["received"])
             body, report = run(lambda stage: save(stage=stage, since=time.time(),
                                                   history=state["history"] + [stage]))
+            if state.get("result_mode") == "url":
+                from server import print_uploads
+
+                key = f"results/{job_id}/model.stl"
+                print_uploads.client().put_object(Bucket=print_uploads.bucket(), Key=key,
+                                                  Body=body, ContentType="model/stl")
+                save(type="done", report=report, stl_key=key)
+                return
             chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
             for i, chunk in enumerate(chunks):
                 store.put(f"{job_id}:stl:{i}", chunk)
@@ -136,9 +144,9 @@ def run_existing(job_id, run):
         finished.set()
 
 
-def start(job_id, run, filename):
+def start(job_id, run, filename, result_mode=None):
     """Start a local job in a thread; retries join the existing job."""
-    if not claim(job_id, filename):
+    if not claim(job_id, filename, result_mode=result_mode):
         return False
     threading.Thread(target=run_existing, args=(job_id, run), daemon=True).start()
     return True
