@@ -214,3 +214,32 @@ def test_calibrated_mask_uses_native_resolution(tmp_path, monkeypatch):
     expected = np.zeros((8, 8), bool)
     expected[2:6, 2:6] = True
     assert np.array_equal(_depth_mask(frame, mask), expected)
+
+
+@pytest.mark.parametrize("tap", [None, [20, 24], [44, 24], [32, 24]])
+def test_calibrated_mask_bridges_invalid_depth_stripe(tmp_path, tap):
+    depth = np.full((48, 64), 0.4, dtype="<f4")
+    depth[:, 31:33] = np.nan
+    path = tmp_path / "depth.f32"
+    path.write_bytes(depth.tobytes())
+    calibration = json.dumps(dict(fx=55, fy=55, cx=32, cy=24, width=64, height=48))
+    frame = Frame.load(str(path), 64, 48, intrinsics=calibration,
+                       depth_intrinsics=calibration,
+                       object_points=json.dumps([tap]) if tap is not None else None)
+    mask = np.zeros((48, 64), bool)
+    mask[8:40, 8:56] = True
+    expected = mask & np.isfinite(depth)
+    mask[1:4, 1:4] = True
+    actual = _depth_mask(frame, mask)
+    assert np.array_equal(actual, expected)
+    assert actual[:, :31].any() and actual[:, 33:].any()
+    assert not actual[:, 31:33].any()
+
+
+def test_calibrated_mask_without_valid_depth(tmp_path):
+    path = tmp_path / "depth.f32"
+    path.write_bytes(np.full((8, 8), np.nan, dtype="<f4").tobytes())
+    calibration = json.dumps(dict(fx=8, fy=8, cx=4, cy=4, width=8, height=8))
+    frame = Frame.load(str(path), 8, 8, intrinsics=calibration,
+                       depth_intrinsics=calibration, object_points="[[4, 4]]")
+    assert not _depth_mask(frame, np.ones((8, 8), bool)).any()

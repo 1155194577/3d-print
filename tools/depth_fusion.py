@@ -207,6 +207,7 @@ def _object_mask(mask, taps):
 
 def _depth_mask(frame, mask):
     from PIL import Image
+    from scipy import ndimage
 
     h, w = frame.depth.shape
     mask = np.asarray(mask)
@@ -234,7 +235,8 @@ def _depth_mask(frame, mask):
         vu = np.argwhere(valid)
         taps = [vu[np.argmin(np.sum((uv[valid] - tap) ** 2, axis=1))][::-1]
                 for tap in frame.taps]
-    return _object_mask(registered, taps)
+    connected = ndimage.binary_closing(registered, iterations=3) | registered
+    return _object_mask(connected, taps) & registered
 
 
 def _umeyama(src, dst):
