@@ -30,8 +30,10 @@ def download_weights():
 
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    # CUDA devel base (matching torch's cu13.2 wheels) so torchmcubes builds with GPU support.
+    modal.Image.from_registry("nvidia/cuda:13.2.1-devel-ubuntu24.04", add_python="3.11")
     .apt_install("git", "build-essential", "cmake", "libgl1", "libglib2.0-0")
+    .env({"CUDA_HOME": "/usr/local/cuda", "TORCH_CUDA_ARCH_LIST": "8.9", "CC": "gcc", "CXX": "g++"})
     .pip_install_from_requirements(str(ROOT / "research" / "triposr_requirements.txt"))
     .pip_install_from_requirements(str(ROOT / "server" / "requirements-web.txt"))
     .run_commands("pip install --no-build-isolation git+https://github.com/tatsy/torchmcubes.git")
