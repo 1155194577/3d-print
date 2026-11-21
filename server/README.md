@@ -71,6 +71,38 @@ Errors are JSON `{"detail": "..."}`:
 | 413 | upload over 200 MB (`PRINT_MAX_UPLOAD_MB`) |
 | 422 | invalid field value, or a file that does not parse or reconstruct into a mesh |
 
+### Streamed progress and print jobs
+
+Send `Accept: application/x-ndjson` and the print becomes a job that runs on the server whether
+or not the app stays connected. Auth and validation errors (400/401/413/415) are still plain
+JSON errors. Otherwise the response is `200 application/x-ndjson`, one JSON object per line,
+flushed as it goes:
+
+```
+{"type":"accepted","job_id":"5f0c…"}
+{"type":"progress","stage":"received","progress":0.02,"message":"Upload received","elapsed_s":0.0}
+{"type":"progress","stage":"reconstruct","progress":0.21,"message":"Reconstructing the shape","elapsed_s":6.1}
+...
+{"type":"done","progress":1.0,"filename":"mug.stl","report":{...X-Print-Report...},"stl_base64":"...","elapsed_s":41.8}
+```
+
+- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
+- The current stage repeats every 2 s as a heartbeat. Its `progress` creeps toward the next stage's start and never reaches it.
+- The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either means the connection dropped, not that the print failed: resume it.
+- Optional form field `job_id` (a UUID the app picks). A retry with the same id joins that job instead of starting a second print.
+
+Resuming, from any container, for 24 h after the job starts (unknown or expired ids are 404):
+
+| Route | Answer |
+|---|---|
+| `GET /print/{job_id}` + `Accept: application/x-ndjson` | the latest line, then the stream as above to `done` (without `stl_base64`) or `error` |
+| `GET /print/{job_id}` | the latest line as one JSON object |
+| `GET /print/{job_id}/result` | held open until the job ends: `model/stl` + `X-Print-Report`, or the job's error as `{"detail"}` with its status |
+
+On Modal, job state lives in the `3d-print-jobs` modal.Dict, so any container can answer. A job whose
+container dies (a redeploy) turns into an error within 90 s. Nothing arrives while Modal cold-starts
+the GPU container (up to about 4 minutes).
+
 ## `GET /api/health`
 
 `{"status": "ok"}` (more fields locally), no auth.
