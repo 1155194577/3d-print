@@ -1,0 +1,7 @@
+# The print server (deploy/box): everything but TripoSR, which it calls on Modal.
+# Install with the pinned set as constraints:
+#   uv pip install -r deploy/box/requirements.txt -c research/triposr_requirements.txt
+-r ../../server/requirements-web.txt
+pymeshfix
+manifold3d
+modal>=1.6

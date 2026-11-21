@@ -147,7 +147,12 @@ class PhotoReconstructor:
             meshes[0].export(out_path)
 
 
-reconstruct_photo = PhotoReconstructor()
+if os.environ.get("TRIPOSR_BACKEND") == "modal":
+    from server.remote_triposr import ModalReconstructor
+
+    reconstruct_photo = ModalReconstructor()
+else:
+    reconstruct_photo = PhotoReconstructor()
 router = APIRouter(route_class=PrintRoute)
 
 

@@ -1,0 +1,12 @@
+# HTTPS for the print server; the certificate comes from Let's Encrypt for the sslip.io name.
+{$PRINT_HOST:47-237-92-84.sslip.io} {
+	encode {
+		match {
+			not header Content-Type application/x-ndjson*
+		}
+		gzip
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1
+	}
+}
