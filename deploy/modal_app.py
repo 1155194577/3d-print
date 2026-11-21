@@ -64,6 +64,10 @@ def web():
 
     sys.path.insert(0, APP_DIR)
     from server.print_api import create_print_app, reconstruct_photo
+    from server import print_jobs
+
+    print_jobs.store = print_jobs.ModalDictStore(
+        modal.Dict.from_name("3d-print-jobs", create_if_missing=True))
 
     reconstruct_photo.load()
     return create_print_app()

@@ -59,7 +59,7 @@ class FakeFace:
     def __init__(self, mesh, mask):
         self.mesh, self.mask = mesh, mask
 
-    def __call__(self, image_path, out_path, quarter_turns=None):
+    def __call__(self, image_path, out_path, quarter_turns=None, progress=None):
         mesh = self.mesh.copy()
         mesh.apply_scale(3.7)
         mesh.apply_translation([0.1, -0.2, 0.3])
