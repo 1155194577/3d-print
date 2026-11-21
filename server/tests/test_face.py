@@ -73,6 +73,82 @@ class FakeFace:
         return self.mask.astype(np.uint8) * 255
 
 
+def turned_head(yaw):
+    truth = trimesh.creation.icosphere(subdivisions=4)
+    truth.apply_scale([0.075, 0.085, 0.12])
+    p = truth.vertices
+    p[:, 1] -= 0.016 * np.exp(-((p[:, 0] / 0.022) ** 2 + (p[:, 2] / 0.035) ** 2)) * (p[:, 1] < 0)
+    anchor = trimesh.transformations.rotation_matrix(np.radians(yaw), [0, 1, 0])
+    anchor[:3, 3] = [0, 0, -0.4]
+    basis = np.eye(4)
+    basis[:3, :3] = [[1, 0, 0], [0, 0, 1], [0, -1, 0]]
+    cv = np.diag([1., -1., -1., 1.]) @ anchor @ basis
+    rendered = truth.copy()
+    rendered.apply_transform(cv)
+    w, h, f = 128, 160, 200
+    u, v = np.meshgrid(np.arange(w) + .5, np.arange(h) + .5)
+    rays = np.stack([(u-w/2)/f, (v-h/2)/f, np.ones_like(u)], -1).reshape(-1, 3)
+    locations, indices, _ = rendered.ray.intersects_location(np.zeros_like(rays), rays, multiple_hits=False)
+    depth = np.full(w*h, np.nan)
+    depth[indices] = locations[:, 2]
+    frame = Frame(depth.reshape(h, w), np.array([[f, 0, w/2], [0, f, h/2], [0, 0, 1]]),
+                  camera_to_world=np.eye(4))
+    return truth, frame, np.isfinite(frame.depth), anchor
+
+
+def test_multiview_turning_head_improves_sides():
+    truth, front, mask, anchor = turned_head(0)
+    guess = truth.copy()
+    guess.vertices[:, 0] *= .91
+    views = []
+    for yaw in [35, -35, 65, -65]:
+        _, frame, other_mask, other_anchor = turned_head(yaw)
+        views.append(dict(frame=frame, mask=other_mask, face_to_world=other_anchor))
+    single, one = api.depth_fusion.fuse_face(guess, front, mask, anchor)
+    multi, many = api.depth_fusion.fuse_face(guess, front, mask, anchor, views)
+    assert many["views_used"] == 5
+    assert many["seen_vertices"] > one["seen_vertices"]
+    # Compare side widths against the measured 150 mm ellipsoid width.
+    assert abs(multi.extents[0] - .15) < abs(single.extents[0] - .15)
+
+
+def test_multiview_skips_sparse_and_missing_pose():
+    truth, frame, mask, anchor = turned_head(0)
+    sparse = Frame(np.full_like(frame.depth, np.nan), frame.K, camera_to_world=np.eye(4))
+    _, report = api.depth_fusion.fuse_face(truth, frame, mask, anchor, [
+        dict(frame=sparse, mask=mask, face_to_world=anchor),
+        dict(frame=frame, mask=mask, face_to_world=None)])
+    assert report["views_used"] == 1
+    assert "0 valid head points" in report["views_skipped"][0]["reason"]
+    assert "missing" in report["views_skipped"][1]["reason"]
+
+
+@pytest.mark.parametrize("count", ["6", "0", "bad", "1.5"])
+def test_invalid_view_count(client, count):
+    response = client.post("/print", data={"view_count": count},
+                           files={"photo": ("face.jpg", photo_bytes())})
+    assert response.status_code == 400
+    assert "view_count" in response.json()["detail"]
+
+
+def test_multiview_request_validation(client, monkeypatch):
+    mesh, depth, mask, intr = face_frame()
+    monkeypatch.setattr(api, "reconstruct_photo", FakeFace(mesh, mask))
+    fields = dict(mode="face", view_count="2", depth_width=str(depth.shape[1]),
+                  depth_height=str(depth.shape[0]), intrinsics=json.dumps(intr))
+    files = {"photo": ("face.jpg", photo_bytes()), "depth": ("depth.f32", depth.tobytes()),
+             "view_1_photo": ("face.jpg", photo_bytes()), "view_1_depth": ("depth.f32", depth.tobytes())}
+    fields.update({"view_1_" + key: fields[key] for key in ("depth_width", "depth_height", "intrinsics")})
+    fields["view_1_face_transform"] = "{"
+    assert client.post("/print", data=fields, files=files).status_code == 400
+    del fields["view_1_face_transform"]
+    _, report = result(client.post("/print", data=fields, files=files))
+    assert report["views_used"] == 1
+    assert "missing" in report["fusion"]["views_skipped"][0]["reason"]
+    fields["mode"] = "object"
+    assert client.post("/print", data=fields, files=files).status_code == 400
+
+
 @pytest.mark.parametrize("anchor", [False, True])
 def test_face_depth_bust(client, monkeypatch, anchor):
     mesh, depth, mask, intr = face_frame()

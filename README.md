@@ -138,6 +138,29 @@ their files expire after `TRIPOSR_JOB_TTL_MIN` (default 120).
 python -m pytest server/tests -q      # no GPU needed
 ```
 
+## Turn-your-head face captures
+
+`POST /print` accepts `view_count` (integer 1–5, default 1) for `mode=face`
+with front-view depth. Existing photo/depth/calibration fields describe view 0.
+For each additional view `i=1..view_count-1`, send files `view_<i>_photo`
+(sensor-orientation JPEG) and `view_<i>_depth` (float32 LE metres), plus
+`view_<i>_image_orientation`, `view_<i>_intrinsics`,
+`view_<i>_camera_transform`, `view_<i>_face_transform`,
+`view_<i>_depth_width`, `view_<i>_depth_height`. Optional calibration fields are
+`view_<i>_depth_intrinsics` and `view_<i>_depth_extrinsics`; `view_<i>_yaw_deg`
+is informational only. Transforms are column-major 4×4 matrices from one shared
+ARKit world session. Send `face_vertices` only once, for the front.
+
+These extra photo/depth names are also accepted by `POST /print/uploads` and
+`uploaded=`, with default suffixes `.jpg`/`.f32`. Malformed calibration JSON
+returns 400; missing poses and fewer than 200 valid head points skip that view.
+Head anchors register the moving head to the front depth camera, followed by
+bounded rigid ICP. All usable views constrain alignment and visible-surface
+displacements; TripoSR fills unseen back/top regions. The front anchor defines
+the neck cut. Fusion reports include `views_used` and `views_skipped` (view
+index and reason); face summaries and NDJSON `done` events also include
+top-level `views_used`. Absent `view_count` preserves single-view behavior.
+
 ## Docker
 
 ```bash

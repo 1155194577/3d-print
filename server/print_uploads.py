@@ -19,6 +19,7 @@ from starlette.datastructures import FormData, Headers, UploadFile
 from server import print_jobs
 
 NAMES = {"photo", "mesh", "depth", "depth_confidence", "face_vertices"}
+NAMES |= {f"view_{i}_{part}" for i in range(1, 5) for part in ("photo", "depth")}
 SUFFIXES = {"image/jpeg": ".jpg", "model/vnd.usdz+zip": ".usdz", "model/vnd.pixar.usd": ".usdz",
             "application/x-ply": ".ply", "model/ply": ".ply", "model/obj": ".obj", "text/plain": ".obj"}
 EXPIRES_IN = 900
@@ -75,6 +76,8 @@ def register(payload, limit):
             raise HTTPException(400, f"{name}: invalid filename")
         defaults = {"photo": ".jpg", "mesh": ".obj", "depth": ".f32",
                     "depth_confidence": ".u8", "face_vertices": ".f32"}
+        defaults.update({f"view_{i}_{part}": suffix for i in range(1, 5)
+                         for part, suffix in (("photo", ".jpg"), ("depth", ".f32"))})
         suffix = (defaults[name] if content_type == "application/octet-stream" else
                   SUFFIXES.get(content_type.split(";")[0].strip().lower())
                   or mimetypes.guess_extension(content_type))
