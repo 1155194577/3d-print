@@ -69,6 +69,7 @@ def test_mesh_keeps_real_size_and_stands_up(client, ext):
     assert x == pytest.approx(100 + 18, abs=0.5)
     assert y == pytest.approx(200 + 18, abs=0.5)
     assert rep["watertight"] and stl.is_watertight
+    assert rep["printability"]["printable"] and rep["printability"]["errors"] == []
 
 
 @pytest.mark.parametrize("units", ["m", "cm", "mm"])
