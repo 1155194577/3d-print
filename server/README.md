@@ -17,6 +17,8 @@ modal deploy deploy/modal_app.py               # serverless GPU, see that file
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
+| `mode` | `object` \| `face` | `object` | Face mode requires a photo and produces a flat-cut bust. |
+| `face_transform` | JSON array of 16 floats | | Optional column-major `ARFaceAnchor.transform` in ARKit world coordinates (origin at head centre, +Y face up). Used only in face mode; requires `camera_transform` for depth fusion. |
 | `mesh` | file | | LiDAR scan: `.usdz`, `.obj`, `.ply` (also `.glb`, `.stl`). Skips TripoSR. |
 | `photo` | file | | `.jpg`, `.png` or `.webp` (not HEIC). EXIF rotation is honoured. |
 | `height_mm` | number > 0 | | Measured height of the object in mm. Photo: replaces the 200 mm default. Mesh: overrides the scan's real size. |
@@ -44,6 +46,8 @@ only a fallback), the seen side is the LiDAR surface, and TripoSR fills in the h
 | `depth_width`, `depth_height` | int | depth map size, e.g. 256 × 192 (raw depth only) |
 | `depth_confidence` | file `.u8`, optional | `confidenceMap`, uint8 0/1/2, same size; 0 is dropped |
 | `intrinsics` | JSON | `{"fx","fy","cx","cy","width","height"}` in photo pixels; scaled to the depth size |
+| `depth_intrinsics` | JSON, optional | Same keys, calibrated depth camera values in depth pixels. Width/height describe that calibration; scaled to the uploaded depth map if different. Overrides the depth K derived from `intrinsics`. |
+| `depth_extrinsics` | JSON, optional | 16 finite floats, column-major depth-camera → photo-camera transform in metres, OpenCV axes (x right, y down, z forward). Default identity. |
 | `camera_transform` | JSON, optional | 16 floats, column-major camera-to-world (ARKit, world +Y up): gravity for the floor and upright |
 | `image_orientation` | 1 \| 3 \| 6 \| 8 | EXIF value; upright fallback without `camera_transform` |
 | `object_points` | JSON, optional | `[[u, v], ...]` taps on the object in photo pixels; picks the object region |
@@ -53,6 +57,37 @@ plus a RANSAC plane), align the mesh by trimmed similarity ICP from 8 yaw starts
 seen vertices onto the depth surface and fade that into the hidden side, then the usual
 flatten / repair / base plate. Too few depth points on the object (< 200) falls back to the
 photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
+
+For differently calibrated cameras or aspect ratios (e.g. 640 × 480 depth and
+1280 × 720 photo), supply `depth_intrinsics` as well as the photo `intrinsics`.
+The server back-projects each depth pixel, applies `depth_extrinsics`, and projects
+into the photo to sample its foreground mask and register object taps. Gravity
+is rotated into the depth camera frame. Without `depth_intrinsics`, the original
+mask resize / scaled photo intrinsics path is retained. These fields apply to
+both object and face modes.
+
+### Face busts (`mode=face`)
+
+Send a `photo`, optionally with front-camera TrueDepth from the same ARFrame.
+On iOS, encode `ARFrame.capturedImage` in sensor orientation, **not mirrored**;
+convert `ARFrame.capturedDepthData` to `DepthFloat32` and upload its depth map as
+row-major little-endian float32 metres (e.g. 640 × 480), without a confidence map.
+Send `ARCamera.intrinsics` with the **capturedImage** width and height, and
+`ARCamera.transform` as `camera_transform`. The optional `face_transform` is
+`ARFaceAnchor.transform`, also column-major (16 finite floats).
+
+Face fusion uses gravity, not a floor plane, rejects points more than 25 cm behind
+the nearest foreground point, and cuts 12 cm below the face anchor's head centre.
+Without an anchor it cuts 24 cm below the foreground top, clamped to its lowest
+point. The cap makes the bust stand flat. The fusion report adds `cut`:
+`"face anchor"` or `"top - 24 cm"`.
+
+Face mode always scales the object to **100 mm tall** by default, including after
+depth fusion; `height_mm` overrides this, and the base plate adds 2.5 mm. A photo
+alone (or unusable depth) uses TripoSR and caps off the bottom 20% of its height;
+unusable depth is reported under `fusion.skipped` as above. `face_transform` is
+ignored in object mode; malformed face-mode transforms return 400. Mesh uploads
+are not accepted in face mode. `X-Print-Report` includes `"mode": "face"`.
 
 ### Response
 
