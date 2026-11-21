@@ -1,5 +1,7 @@
+import io
 import json
 from pathlib import Path
+import pickle
 import shutil
 import tempfile
 import threading
@@ -135,7 +137,8 @@ def test_spec_preserves_source_bytes(tmp_path, body):
     assert Path(print_spec.unpack(spec, tmp_path)["src"]).read_bytes() == body
 
 
-def test_spec_relocates_extra_view_photos(tmp_path):
+@pytest.mark.parametrize("with_frame", [False, True])
+def test_spec_relocates_extra_view_photos(tmp_path, with_frame):
     local = tmp_path / "local"
     remote = tmp_path / "remote"
     local.mkdir()
@@ -143,17 +146,38 @@ def test_spec_relocates_extra_view_photos(tmp_path):
     source, extra = local / "photo.jpg", local / "view_1_photo.jpg"
     source.write_bytes(b"front")
     extra.write_bytes(b"side")
-    frame = Frame(np.ones((8, 8)), np.eye(3), camera_to_world=np.eye(4))
+    frame = None
+    if with_frame:
+        frame = Frame(np.ones((8, 8)), np.eye(3), camera_to_world=np.eye(4),
+                      confidence=np.ones((8, 8), dtype=np.uint8),
+                      taps=np.array([[1., 2.]]))
+        frame.depth_to_photo = np.eye(4)
+        frame.photo_K = np.eye(3)
+    mask = np.ones((8, 8), dtype=bool)
     job = dict(src=str(source), workdir=str(local), frame=frame,
-               views=[dict(src=str(extra), frame=frame, face_to_world=np.eye(4))])
+               face_to_world=np.eye(4), gravity=(np.array([0., 1., 0.]), np.int64(1)),
+               views=[dict(src=str(extra), frame=frame, face_to_world=np.eye(4), mask=mask)])
     spec = print_spec.pack(job)
+
+    class BuiltinsOnlyUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            raise AssertionError(f"spec requires importing {module}.{name}")
+
+    spec = BuiltinsOnlyUnpickler(io.BytesIO(pickle.dumps(spec))).load()
     shutil.rmtree(local)
     restored = print_spec.unpack(spec, remote)
     view = restored["views"][0]
     assert Path(view["src"]).read_bytes() == b"side"
     assert Path(view["src"]).parent == remote
-    np.testing.assert_equal(view["frame"].depth, frame.depth)
+    if with_frame:
+        for key, value in vars(frame).items():
+            np.testing.assert_equal(getattr(view["frame"], key), value)
+    else:
+        assert view["frame"] is None
     np.testing.assert_equal(view["face_to_world"], np.eye(4))
+    np.testing.assert_equal(view["mask"], mask)
+    np.testing.assert_equal(restored["face_to_world"], np.eye(4))
+    np.testing.assert_equal(restored["gravity"], job["gravity"])
 
 
 def test_queued_worker_error_and_expired_job(store):
