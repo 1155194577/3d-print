@@ -79,6 +79,8 @@ class Frame:
             raise ValueError('intrinsics wants JSON {"fx","fy","cx","cy","width","height"}')
         if min(fx, fy, pw, ph) <= 0:
             raise ValueError("intrinsics must be positive")
+        if not np.isfinite([fx, fy, cx, cy, pw, ph]).all() or max(pw, ph) > 20000:
+            raise ValueError("intrinsics must be finite with width/height <= 20000")
         sx, sy = w / pw, h / ph
         K = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1.0]])
         photo_K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
@@ -97,6 +99,8 @@ class Frame:
                 df, dg, dc, dd, dw, dh = (float(dk[n]) for n in
                                           ("fx", "fy", "cx", "cy", "width", "height"))
                 if not np.isfinite([df, dg, dc, dd, dw, dh]).all() or min(df, dg, dw, dh) <= 0:
+                    raise ValueError
+                if max(dw, dh) > 20000:
                     raise ValueError
                 K = np.array([[df * w / dw, 0, dc * w / dw],
                               [0, dg * h / dh, dd * h / dh], [0, 0, 1.]])
@@ -211,7 +215,8 @@ def _depth_mask(frame, mask):
         return _object_mask(np.asarray(Image.fromarray(mask).resize((w, h), Image.NEAREST)) > 127,
                             frame.taps)
     pw, ph = frame.photo_size
-    mask = np.asarray(Image.fromarray(mask).resize((int(pw), int(ph)), Image.NEAREST)) > 127
+    mask = mask > 127
+    mh, mw = mask.shape
     points = backproject(np.nan_to_num(frame.depth), frame.K)
     E = frame.depth_to_photo
     photo = points @ E[:3, :3].T + E[:3, 3]
@@ -219,9 +224,9 @@ def _depth_mask(frame, mask):
     with np.errstate(divide="ignore", invalid="ignore"):
         uv = projected[..., :2] / projected[..., 2:]
     valid = np.isfinite(uv).all(-1) & (photo[..., 2] > 0) & np.isfinite(frame.depth)
-    ix = np.floor(np.clip(np.nan_to_num(uv[..., 0]), -1, pw)).astype(int)
-    iy = np.floor(np.clip(np.nan_to_num(uv[..., 1]), -1, ph)).astype(int)
-    valid &= (ix >= 0) & (ix < pw) & (iy >= 0) & (iy < ph)
+    ix = np.floor(np.clip(np.nan_to_num(uv[..., 0]) * (mw / pw), -1, mw)).astype(int)
+    iy = np.floor(np.clip(np.nan_to_num(uv[..., 1]) * (mh / ph), -1, mh)).astype(int)
+    valid &= (ix >= 0) & (ix < mw) & (iy >= 0) & (iy < mh)
     registered = np.zeros((h, w), bool)
     registered[valid] = mask[iy[valid], ix[valid]]
     taps = None

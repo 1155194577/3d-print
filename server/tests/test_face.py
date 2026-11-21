@@ -179,3 +179,38 @@ def test_bad_depth_calibration(client, field, value):
 def test_invalid_mode(client):
     response = client.post("/print", data={"mode": "portrait"}, files={"photo": ("a.png", photo_bytes())})
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("separate_depth", [False, True])
+@pytest.mark.parametrize("field", ["intrinsics", "depth_intrinsics"])
+def test_calibration_dimensions_bounded(tmp_path, field, separate_depth):
+    path = tmp_path / "depth.f32"
+    path.write_bytes(np.ones((8, 8), dtype="<f4").tobytes())
+    calibration = dict(fx=8, fy=8, cx=4, cy=4, width=8, height=8)
+    kwargs = {"intrinsics": json.dumps(calibration)}
+    if separate_depth:
+        kwargs["depth_intrinsics"] = json.dumps(calibration)
+    kwargs[field] = json.dumps({**calibration, "width": 1000000000})
+    with pytest.raises(ValueError, match=field):
+        Frame.load(str(path), 8, 8, **kwargs)
+
+
+def test_calibrated_mask_uses_native_resolution(tmp_path, monkeypatch):
+    from PIL import Image
+
+    path = tmp_path / "depth.f32"
+    path.write_bytes(np.ones((8, 8), dtype="<f4").tobytes())
+    photo = dict(fx=16000, fy=16000, cx=8000, cy=8000, width=16000, height=16000)
+    depth = dict(fx=8, fy=8, cx=4, cy=4, width=8, height=8)
+    frame = Frame.load(str(path), 8, 8, intrinsics=json.dumps(photo),
+                       depth_intrinsics=json.dumps(depth))
+    mask = np.zeros((16, 16), bool)
+    mask[4:12, 4:12] = True
+
+    def reject_resize(*args, **kwargs):
+        pytest.fail("calibrated registration must not resize the mask")
+
+    monkeypatch.setattr(Image.Image, "resize", reject_resize)
+    expected = np.zeros((8, 8), bool)
+    expected[2:6, 2:6] = True
+    assert np.array_equal(_depth_mask(frame, mask), expected)
