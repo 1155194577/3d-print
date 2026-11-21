@@ -49,7 +49,7 @@ def main():
     torch.set_grad_enabled(False)
     base = te.load_tsr(args.model_dir)
     session = rembg.new_session()
-    images = {os.path.basename(p): te.preprocess(p, session) for p in args.images}
+    images = {p: te.preprocess(p, session) for p in dict.fromkeys(args.images)}
 
     models = {}
     # fp32 runs first: it is the reference every other scheme is compared with.
