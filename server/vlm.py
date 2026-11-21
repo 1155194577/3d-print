@@ -35,10 +35,12 @@ class QwenVLM:
         import torch
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        cuda = torch.cuda.is_available()
+        self.device = "cuda" if cuda else "cpu"
         self.processor = AutoProcessor.from_pretrained(self.model_id)
+        # bf16 on CPU is slow and answers differently from the GPU; float32 there.
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            self.model_id, dtype=torch.bfloat16).to(self.device).eval()
+            self.model_id, dtype=torch.bfloat16 if cuda else torch.float32).to(self.device).eval()
 
     def __call__(self, jpeg: bytes, questions: dict[str, str]) -> dict[str, str]:
         """{name: question} -> {name: answer}, each asked about the photo on its own."""
