@@ -137,6 +137,15 @@ their files expire after `TRIPOSR_JOB_TTL_MIN` (default 120).
 python -m pytest server/tests -q      # no GPU needed
 ```
 
+## Docker
+
+```bash
+docker build -t 3d-print .
+docker run --gpus all -p 8000:8000 -e PRINT_API_TOKEN=... -v 3d-print-models:/models 3d-print
+```
+
+Serves the web app and `POST /print` on port 8000. It runs on CPU when you leave out `--gpus all`. The weights (~2.7 GB) download into `/models` on first use; `--build-arg BAKE_WEIGHTS=1` bakes them into the image instead. On every PR and push, CI (`.github/workflows/docker.yml`) runs the tests, builds the image and smoke-tests it. Pushes to `main` and `v*` tags also publish it to `ghcr.io/1155194577/3d-print` (`latest`, `main`, `sha-…`, version).
+
 ## What it does, stage by stage
 
 1. **TripoSR** — image → mesh (vertex colours, 256³ marching cubes) on the GPU, ~30–90 s
