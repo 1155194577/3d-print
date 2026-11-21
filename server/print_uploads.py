@@ -172,7 +172,6 @@ async def resolve(request, limit):
             if any(isinstance(value, UploadFile) for value in form.getlist(name)):
                 raise HTTPException(400, f"{name}: send either a file part or uploaded, not both")
         if await run_in_threadpool(print_jobs.get_state, job_id) is not None:
-            cleanup = False
             request.state.print_join_job_id = job_id
             yield
             return

@@ -133,6 +133,10 @@ def test_two_step_face_matches_multipart(s3_client, monkeypatch, accept):
               if accept == "application/x-ndjson" else json.loads(response.headers["X-Print-Report"]))
     assert report == json.loads(legacy.headers["X-Print-Report"])
     assert keys(s3, registration["job_id"]) == []
+    refreshed = register(client, files, registration["job_id"])
+    for name, (_, body, _) in files.items():
+        put(s3, refreshed, name, body)
+    assert keys(s3, registration["job_id"])
     original = print_jobs.get_state(registration["job_id"])
     retry = client.post("/print", data={**data, "job_id": registration["job_id"],
                         "uploaded": ",".join(files)}, headers={"Accept": "application/x-ndjson"})
@@ -142,6 +146,7 @@ def test_two_step_face_matches_multipart(s3_client, monkeypatch, accept):
     assert events[-1]["type"] == "done"
     assert events[-1]["report"] == report
     assert print_jobs.get_state(registration["job_id"]) == original
+    assert keys(s3, registration["job_id"]) == []
 
 
 @pytest.mark.parametrize("data", [{"mode": "face", "face_transform": "bad"},
