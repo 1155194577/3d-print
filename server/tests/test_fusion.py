@@ -169,3 +169,23 @@ def test_depth_needs_photo(client):
     resp = client.post("/print", files={"mesh": ("a.obj", b"v 0 0 0"),
                                         "depth": ("d.f32", b"\0\0\0\0")})
     assert resp.status_code == 400
+
+
+def test_portrait_without_transform_or_floor(client, monkeypatch):
+    roll = np.eye(4)
+    roll[:3, :3] = trimesh.transformations.rotation_matrix(np.pi / 2, [0, 0, 1])[:3, :3]
+    M = camera_to_world() @ roll
+    depth, mask = render(M)
+    depth[~mask] = np.nan  # no floor in view
+    monkeypatch.setattr(api, "reconstruct_photo", FakeTripoSR(mask))
+    files, data = frame_request(depth, image_orientation="6")
+    stl, rep = result(client.post("/print", files=files, data=data))
+    assert rep["fusion"]["floor"] == "lowest point" and stl.is_watertight
+
+
+def test_corrupt_depth_png(client, monkeypatch):
+    monkeypatch.setattr(api, "reconstruct_photo", FakeTripoSR(np.zeros((H, W), bool)))
+    files, data = frame_request(np.ones((H, W)))
+    files["depth"] = ("depth.png", b"not a png")
+    resp = client.post("/print", files=files, data=data)
+    assert resp.status_code == 400 and "PNG" in resp.json()["detail"]

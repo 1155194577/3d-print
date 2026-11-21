@@ -246,7 +246,9 @@ def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
         raise FusionError(f"only {len(pts)} depth points above the floor")
 
     # gravity frame G: z up, floor at z=0, x along the camera's horizontal right
-    x = np.array([1.0, 0, 0]) - up[0] * up
+    # (a portrait frame has the camera's x vertical; use its y then)
+    ref = np.eye(3)[0 if abs(up[0]) < 0.9 else 1]
+    x = ref - (ref @ up) * up
     x /= np.linalg.norm(x)
     RG = np.stack([x, np.cross(up, x), up])
     to_g = lambda p: (p - origin) @ RG.T  # noqa: E731
