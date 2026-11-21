@@ -1,8 +1,8 @@
 """POST /print: a LiDAR-scanned mesh, or a photo plus its measured height, in;
 a printable STL out, in one synchronous request. Contract: server/README.md.
 
-Unlike the /api/jobs queue, which spawns bin/triposr per job, this keeps
-TripoSR loaded in a persistent worker process, isolated from the ASGI GIL.
+The local runner executes in-process; Modal dispatches validated uploads to a
+GPU function, keeping its GIL and scheduling delays away from the CPU frontend.
 """
 
 import asyncio
@@ -36,7 +36,6 @@ import photo_level  # noqa: E402
 import printability  # noqa: E402
 
 from server import print_jobs  # noqa: E402
-from server.print_worker import execute_job  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -310,21 +309,38 @@ def print_stl(
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
                mode=mode, face_to_world=face_to_world, image_orientation=image_orientation)
 
-    if _wants_ndjson(accept):
-        def run(progress):
-            try:
-                return execute_job(job, progress)
-            finally:
-                shutil.rmtree(workdir, ignore_errors=True)
-
-        if not print_jobs.start(job_id, run, f"{name}.stl"):
-            shutil.rmtree(workdir, ignore_errors=True)  # a retry: join the job already running
-        return _ndjson(_events(job_id, accepted=True, with_stl=True))
     try:
-        body, summary = execute_job(job, lambda *a: None)
-    finally:
+        if not submit_job(job_id, job, f"{name}.stl"):
+            shutil.rmtree(workdir, ignore_errors=True)  # a retry: join the job already running
+    except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
-    return _stl_response(body, summary, f"{name}.stl")
+        raise
+    if _wants_ndjson(accept):
+        return _ndjson(_events(job_id, accepted=True, with_stl=True))
+    state = print_jobs.get_state(job_id)
+    while state is not None and state["type"] == "progress":
+        time.sleep(POLL_S)
+        state = print_jobs.get_state(job_id)
+    if state is None:
+        raise HTTPException(404, "the print job expired")
+    if state["type"] == "error":
+        raise HTTPException(state["status"], state["detail"])
+    return _stl_response(print_jobs.get_stl(job_id), state["report"], state["filename"])
+
+
+def execute_job(job, progress):
+    return _make_stl(job, progress)
+
+
+def submit_job(job_id, job, filename):
+    """Local runner; the Modal CPU frontend replaces this with GPU dispatch."""
+    def run(progress):
+        try:
+            return execute_job(job, progress)
+        finally:
+            shutil.rmtree(job["workdir"], ignore_errors=True)
+
+    return print_jobs.start(job_id, run, filename)
 
 
 def _stl_response(body, summary, filename):
@@ -383,6 +399,7 @@ async def print_result(job_id: str):
 
 # stage -> (progress when it starts, message); the order is the order they run in
 STAGES = {
+    "queued": (0.01, "Waiting for a print server GPU"),
     "received": (0.02, "Upload received"),
     "background": (0.08, "Removing the background"),
     "reconstruct": (0.15, "Reconstructing the shape"),

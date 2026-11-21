@@ -1,4 +1,4 @@
-"""Deploy POST /print, POST /photo-check (and GET /api/health) on Modal (serverless GPU).
+"""Always-warm CPU uploads/streams, with independently scheduled GPU print jobs.
 
 Only the synchronous routes are exposed, behind PRINT_API_TOKEN; the browser
 uploader and its in-memory /api/jobs queue stay local-only. /photo-check's VLM
@@ -9,7 +9,7 @@ needs a newer transformers than TripoSR, so it runs in its own GPU container
     modal deploy deploy/modal_app.py
 
 Prints the URL, https://<workspace>--3d-print-web.modal.run. Model weights
-are baked into the image, so a cold start only loads them onto the GPU.
+are baked into the GPU image; accepting uploads never waits for a GPU.
 """
 
 from pathlib import Path
@@ -69,7 +69,34 @@ vlm_image = (
     .run_function(download_vlm)
 )
 
-app = modal.App("3d-print", image=image)
+cpu_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install_from_requirements(str(ROOT / "server" / "requirements-web.txt"))
+    .add_local_dir(ROOT / "tools", f"{APP_DIR}/tools", ignore=SKIP)
+    .add_local_dir(ROOT / "server", f"{APP_DIR}/server", ignore=SKIP + ["jobs", "tests"])
+)
+
+app = modal.App("3d-print", image=cpu_image)
+
+
+@app.function(image=image, gpu="L4", timeout=600, scaledown_window=300)
+def run_print(job_id, spec):
+    import sys
+    import tempfile
+
+    sys.path.insert(0, APP_DIR)
+    from server import print_jobs, print_spec
+    from server.print_api import _make_stl
+
+    print_jobs.store = print_jobs.ModalDictStore(
+        modal.Dict.from_name("3d-print-jobs", create_if_missing=True))
+
+    def run(progress):
+        with tempfile.TemporaryDirectory(prefix="print_") as directory:
+            job = print_spec.unpack(spec, directory)
+            return _make_stl(job, progress)
+
+    print_jobs.run_existing(job_id, run)
 
 
 @app.cls(image=vlm_image, gpu="L4", timeout=120, scaledown_window=300)
@@ -88,23 +115,42 @@ class PhotoCheckVLM:
 
 
 @app.function(
-    gpu="L4",
-    timeout=600,
+    image=cpu_image,
+    min_containers=1,
+    timeout=1800,
     scaledown_window=300,
     secrets=[modal.Secret.from_name("3d-print-api")],
 )
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()
 def web():
+    import shutil
     import sys
 
     sys.path.insert(0, APP_DIR)
-    from server import photo_check
+    from fastapi import HTTPException
+    from server import photo_check, print_api, print_spec
     from server.print_api import create_print_app
     from server import print_jobs
 
     print_jobs.store = print_jobs.ModalDictStore(
         modal.Dict.from_name("3d-print-jobs", create_if_missing=True))
 
+    def submit(job_id, job, filename):
+        try:
+            spec = print_spec.pack(job)
+            if not print_jobs.claim(job_id, filename, stage="queued"):
+                return False
+            try:
+                run_print.spawn(job_id, spec)
+            except Exception as exc:
+                detail = "could not queue the print job; please retry"
+                print_jobs.fail(job_id, 502, detail)
+                raise HTTPException(502, detail) from exc
+            return True
+        finally:
+            shutil.rmtree(job["workdir"], ignore_errors=True)
+
+    print_api.submit_job = submit
     photo_check.vlm = PhotoCheckVLM().ask.remote
     return create_print_app()

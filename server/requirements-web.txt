@@ -2,6 +2,10 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
+numpy>=2.0
+trimesh>=4.0
+scipy>=1.11
+pillow>=10.0
 usd-core>=24.0          # USDZ scans for POST /print
 shapely>=2.0           # planar bust caps
 mapbox-earcut>=1.0
