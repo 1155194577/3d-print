@@ -91,21 +91,15 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
     raw_extents = m.extents.copy()
 
     # ---- 1. scale ------------------------------------------------
+    plate_height = max(base_thickness - 0.5, 0.0) if base_plate else 0.0
     if height:
         cur = m.extents[2]
         if cur <= 0:
             raise SystemExit("Degenerate mesh (zero height)")
-        m.apply_scale(height / cur)
+        if height <= plate_height:
+            raise SystemExit("Height must exceed the base plate's added height")
+        m.apply_scale((height - plate_height) / cur)
         scale_note = f"height → {height:g} mm"
-    elif fit_bed:
-        bx, by, bz = fit_bed
-        e = m.extents
-        factor = min(bx / e[0], by / e[1], bz / e[2])
-        if factor < 1.0:
-            m.apply_scale(factor)
-            scale_note = f"shrunk ×{factor:.3f} to fit {bx:g}×{by:g}×{bz:g} bed"
-        else:
-            scale_note = "already fits the bed"
     else:
         target = size if size else 200.0
         factor = target / m.extents.max()
@@ -150,8 +144,26 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
     except Exception:
         pass
 
+    if height:
+        m.apply_scale((height - plate_height) / m.extents[2])
+    if fit_bed:
+        bx, by, bz = fit_bed
+        ex, ey, ez = m.extents
+        if base_plate:
+            factor = min((bx - 4.0) / ex, (by - 4.0) / ey,
+                         bx / (ex + 0.06 * ez), by / (ey + 0.06 * ez),
+                         (bz - plate_height) / ez)
+        else:
+            factor = min(bx / ex, by / ey, bz / ez)
+        if factor <= 0:
+            raise SystemExit("Bed is too small for the base plate")
+        if factor < 1.0:
+            m.apply_scale(factor)
+            scale_note += f", shrunk ×{factor:.3f} to fit {bx:g}×{by:g}×{bz:g} bed"
+
     # ---- 4. fuse a base plate -----------------------------------
     if base_plate:
+        z_range = m.extents[2]
         margin = max(z_range * 0.03, 2.0)
         x0, x1 = m.vertices[:, 0].min() - margin, m.vertices[:, 0].max() + margin
         y0, y1 = m.vertices[:, 1].min() - margin, m.vertices[:, 1].max() + margin
@@ -159,7 +171,7 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
         # sink it half a mm into the floor so the union definitely fuses
         plate.apply_translation([
             (x0 + x1) / 2, (y0 + y1) / 2,
-            m.vertices[:, 2].min() + base_thickness / 2 - 0.5,
+            m.vertices[:, 2].min() - base_thickness / 2 + 0.5,
         ])
         fused = None
         try:
@@ -240,10 +252,10 @@ def main():
     ap.add_argument("images", nargs="+", help="input image(s): jpg/png/webp")
     ap.add_argument("-o", "--output", help="output path (single image only)")
     ap.add_argument("--outdir", default=".", help="output directory (default: .)")
-    ap.add_argument("--height", type=float, help="scale so the model is this tall (mm)")
+    ap.add_argument("--height", type=float, help="scale to this total height including the base plate (mm)")
     ap.add_argument("--size", type=float, help="scale so the largest dimension is this (mm, default 200)")
     ap.add_argument("--fit-bed", type=str, metavar="WxDxH",
-                    help="shrink to fit a printer bed, e.g. 220x220x250")
+                    help="shrink the scaled model including its base plate to fit a printer bed, e.g. 220x220x250")
     ap.add_argument("--no-base", action="store_true", help="skip the flat base plate")
     ap.add_argument("--base-thickness", type=float, default=3.0, help="base plate thickness in mm (default 3)")
     ap.add_argument("--mc-resolution", type=int, default=256,

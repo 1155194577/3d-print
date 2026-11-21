@@ -85,9 +85,9 @@ CONDA_PREFIX_DIR=/opt/conda/envs/triposr triposr photo.jpg
 
 | Flag | Meaning |
 |---|---|
-| `--height MM` | scale so the model is exactly this tall |
+| `--height MM` | scale to exactly this total height, including the base plate |
 | `--size MM` | scale so the largest dimension is this (default 200) |
-| `--fit-bed WxDxH` | shrink only if it doesn't fit a printer bed |
+| `--fit-bed WxDxH` | scale to `--size` (default 200 mm), then shrink only if needed to fit, including the base plate |
 | `--no-base` | skip the base plate |
 | `--base-thickness MM` | plate thickness, default 3 |
 | `--mc-resolution N` | 256 default; 320–512 = finer geometry, slower |

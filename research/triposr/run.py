@@ -49,7 +49,7 @@ parser.add_argument(
     "--device",
     default="cuda:0",
     type=str,
-    help="Device to use. If no CUDA-compatible device is found, will fallback to 'cpu'. Default: 'cuda:0'",
+    help="Device to use. Unavailable CUDA falls back to MPS or CPU; unavailable MPS falls back to CPU. Default: 'cuda:0'",
 )
 parser.add_argument(
     "--pretrained-model-name-or-path",
@@ -115,8 +115,12 @@ output_dir = args.output_dir
 os.makedirs(output_dir, exist_ok=True)
 
 device = args.device
-if not torch.cuda.is_available():
+if device.split(":")[0] == "cuda" and not torch.cuda.is_available():
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+elif device.split(":")[0] == "mps" and not torch.backends.mps.is_available():
     device = "cpu"
+if device != args.device:
+    logging.warning(f"Requested device {args.device} unavailable; falling back to {device}")
 
 timer.start("Initializing model")
 model = TSR.from_pretrained(
