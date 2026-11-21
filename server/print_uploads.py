@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 import mimetypes
+import logging
 import os
 from pathlib import PurePosixPath
 import tempfile
@@ -86,7 +87,9 @@ def register(payload, limit):
         url = s3.generate_presigned_url("put_object", Params={"Bucket": target, "Key": entry["key"],
                                        "ContentType": entry["content_type"], "ContentLength": entry["size"]},
                                         ExpiresIn=EXPIRES_IN)
-        uploads[name] = dict(url=url, method="PUT", headers={"Content-Type": entry["content_type"]})
+        uploads[name] = dict(url=url, method="PUT", headers={"Content-Type": entry["content_type"]},
+                             file_id=entry["key"], get_url=s3.generate_presigned_url("get_object", Params={
+                                 "Bucket": target, "Key": entry["key"]}, ExpiresIn=3600))
     print_jobs.store.put(f"{job_id}:uploads", dict(created=time.time(), files={**previous["files"], **entries}))
     return dict(job_id=job_id, expires_in=EXPIRES_IN, uploads=uploads)
 
@@ -151,16 +154,25 @@ def preview(job_id):
                 if exc.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
                     continue
                 raise
-            files[name] = dict(key=entry["key"], size=head["ContentLength"],
-                               url=s3.generate_presigned_url("get_object", Params={
+            files[name] = dict(file_id=entry["key"], size=head["ContentLength"],
+                               get_url=s3.generate_presigned_url("get_object", Params={
                                    "Bucket": target, "Key": entry["key"]}, ExpiresIn=3600))
+    if not files:
+        raise HTTPException(404, "no uploaded files for this job")
     return dict(job_id=job_id, files=files)
 
 
-def result_payload(state):
-    url = client().generate_presigned_url("get_object", Params={
-        "Bucket": bucket(), "Key": state["stl_key"]}, ExpiresIn=3600)
-    return dict(report=state["report"], stl_url=url, stl_key=state["stl_key"])
+def result_fields(state):
+    key = state.get("stl_file_id")
+    if not key:
+        return {}
+    try:
+        url = client().generate_presigned_url("get_object", Params={
+            "Bucket": bucket(), "Key": key}, ExpiresIn=3600)
+        return dict(stl_url=url, stl_file_id=key, stl_expires_in=3600)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("could not sign STL result error=%s", type(exc).__name__)
+        return {}
 
 
 def configure_lifecycle():
@@ -192,8 +204,6 @@ async def resolve(request, limit):
         yield
         return
     form = await request.form()
-    if "result" in form and form.get("result") != "url":
-        raise HTTPException(400, "result must be url when provided")
     uploaded = form.get("uploaded")
     if uploaded is None:
         yield

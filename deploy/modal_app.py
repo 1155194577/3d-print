@@ -140,7 +140,7 @@ def web():
     def submit(job_id, job, filename):
         try:
             spec = print_spec.pack(job)
-            if not print_jobs.claim(job_id, filename, stage="queued", result_mode=job.get("result_mode")):
+            if not print_jobs.claim(job_id, filename, stage="queued"):
                 return False
             try:
                 run_print.spawn(job_id, spec)

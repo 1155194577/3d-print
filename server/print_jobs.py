@@ -5,6 +5,8 @@ memory locally), so the app can drop the POST, come back later and pick the job 
 container. Keys: `<id>` holds the state dict, `<id>:stl:<n>` the finished STL in chunks.
 """
 
+import logging
+import os
 import threading
 import time
 
@@ -73,12 +75,12 @@ def get_state(job_id):
     return state
 
 
-def claim(job_id, filename, stage="received", result_mode=None):
+def claim(job_id, filename, stage="received"):
     """Reserve an id before dispatch; retries join the existing job."""
     now = time.time()
     store.prune(now)
     state = dict(type="progress", stage=stage, history=[stage], since=now, created=now, updated=now,
-                 filename=filename, result_mode=result_mode)
+                 filename=filename)
     if not store.put(job_id, state, skip_if_exists=True):
         old = store.get(job_id)
         if old is not None and now - old["created"] <= TTL_S:
@@ -114,18 +116,22 @@ def run_existing(job_id, run):
                 save(stage="received", since=time.time(), history=state["history"] + ["received"])
             body, report = run(lambda stage: save(stage=stage, since=time.time(),
                                                   history=state["history"] + [stage]))
-            if state.get("result_mode") == "url":
+            result = {}
+            if os.environ.get("PRINT_S3_BUCKET"):
                 from server import print_uploads
 
                 key = f"results/{job_id}/model.stl"
-                print_uploads.client().put_object(Bucket=print_uploads.bucket(), Key=key,
-                                                  Body=body, ContentType="model/stl")
-                save(type="done", report=report, stl_key=key)
-                return
+                try:
+                    print_uploads.client().put_object(Bucket=print_uploads.bucket(), Key=key,
+                                                      Body=body, ContentType="model/stl")
+                    result["stl_file_id"] = key
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("could not upload STL result job_id=%s error=%s",
+                                                       job_id, type(exc).__name__)
             chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
             for i, chunk in enumerate(chunks):
                 store.put(f"{job_id}:stl:{i}", chunk)
-            save(type="done", report=report, stl_chunks=len(chunks))
+            save(type="done", report=report, stl_chunks=len(chunks), **result)
         except HTTPException as exc:
             save(type="error", status=exc.status_code, detail=exc.detail)
         except Exception as exc:  # a bug, not the client's fault
@@ -144,9 +150,9 @@ def run_existing(job_id, run):
         finished.set()
 
 
-def start(job_id, run, filename, result_mode=None):
+def start(job_id, run, filename):
     """Start a local job in a thread; retries join the existing job."""
-    if not claim(job_id, filename, result_mode=result_mode):
+    if not claim(job_id, filename):
         return False
     threading.Thread(target=run_existing, args=(job_id, run), daemon=True).start()
     return True

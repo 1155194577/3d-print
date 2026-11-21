@@ -258,13 +258,10 @@ def print_stl(
     object_points: str | None = Form(None, description="[[u, v], ...] taps on the object, photo px"),
     job_id: str | None = Form(None, description="client-chosen UUID; a retry with it joins the job"),
     uploaded: str | None = Form(None, description="comma-separated names uploaded with /print/uploads"),
-    result: str | None = Form(None, description="url to return an S3 STL download link"),
     authorization: str | None = Header(None),
     accept: str | None = Header(None),
 ):
     _check_auth(authorization)
-    if result is not None and result != "url":
-        raise HTTPException(400, "result must be url when provided")
     join_id = getattr(request.state, "print_join_job_id", None)
     if join_id is not None:
         return _job_response(join_id, accept)
@@ -331,7 +328,7 @@ def print_stl(
     job = dict(src=src, is_mesh=mesh is not None, frame=frame, gravity=gravity, height=height, bed=bed,
                base_plate=base_plate, base_thickness=base_thickness,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
-               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation, result_mode=result)
+               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation)
 
     try:
         if not submit_job(job_id, job, f"{name}.stl"):
@@ -353,9 +350,8 @@ def _job_response(job_id, accept):
         raise HTTPException(404, "the print job expired")
     if state["type"] == "error":
         raise HTTPException(state["status"], state["detail"])
-    if state.get("result_mode") == "url":
-        return JSONResponse(print_uploads.result_payload(state))
-    return _stl_response(print_jobs.get_stl(job_id), state["report"], state["filename"])
+    return _stl_response(print_jobs.get_stl(job_id), state["report"], state["filename"],
+                         print_uploads.result_fields(state))
 
 
 def execute_job(job, progress):
@@ -370,15 +366,20 @@ def submit_job(job_id, job, filename):
         finally:
             shutil.rmtree(job["workdir"], ignore_errors=True)
 
-    return print_jobs.start(job_id, run, filename, result_mode=job.get("result_mode"))
+    return print_jobs.start(job_id, run, filename)
 
 
-def _stl_response(body, summary, filename):
-    return Response(body, media_type="model/stl", headers={
+def _stl_response(body, summary, filename, result=None):
+    headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
         "X-Print-Report": json.dumps(summary, ensure_ascii=True),
         "Access-Control-Expose-Headers": "X-Print-Report, Content-Disposition",
-    })
+    }
+    if result:
+        headers.update({"X-STL-URL": result["stl_url"], "X-STL-File-ID": result["stl_file_id"],
+                        "X-STL-Expires-In": str(result["stl_expires_in"])})
+        headers["Access-Control-Expose-Headers"] += ", X-STL-URL, X-STL-File-ID, X-STL-Expires-In"
+    return Response(body, media_type="model/stl", headers=headers)
 
 
 def _wants_ndjson(accept):
@@ -410,9 +411,10 @@ async def print_job(job_id: str, accept: str | None = Header(None)):
     job_id, state = await run_in_threadpool(_job_state, job_id)
     if _wants_ndjson(accept):
         return _ndjson(_events(job_id, accepted=False, with_stl=False))
-    if state["type"] == "done" and state.get("result_mode") == "url":
-        return {"type": "done", **await run_in_threadpool(print_uploads.result_payload, state)}
-    return _line(state)
+    line = _line(state)
+    if state["type"] == "done":
+        line.update(await run_in_threadpool(print_uploads.result_fields, state))
+    return line
 
 
 @router.get("/print/{job_id}/result", response_class=Response,
@@ -425,10 +427,9 @@ async def print_result(job_id: str):
         job_id, state = await run_in_threadpool(_job_state, job_id)
     if state["type"] == "error":
         return JSONResponse({"detail": state["detail"]}, status_code=state["status"])
-    if state.get("result_mode") == "url":
-        return JSONResponse(await run_in_threadpool(print_uploads.result_payload, state))
     body = await run_in_threadpool(print_jobs.get_stl, job_id)
-    return _stl_response(body, state["report"], state["filename"])
+    return _stl_response(body, state["report"], state["filename"],
+                         await run_in_threadpool(print_uploads.result_fields, state))
 
 
 # stage -> (progress when it starts, message); the order is the order they run in
@@ -624,15 +625,13 @@ async def _events(job_id, accepted, with_stl):
         sent = max(sent, len(history) - running)
         line = _line(state)
         if state["type"] == "done":
-            if state.get("result_mode") == "url":
-                async for ready, value in _wait_with_heartbeats(
-                        run_in_threadpool(print_uploads.result_payload, state), last_progress, sent_at):
-                    if not ready:
-                        sent_at = time.monotonic()
-                        yield out(value)
-                    else:
-                        yield out({"type": "done", **value})
-                return
+            async for ready, value in _wait_with_heartbeats(
+                    run_in_threadpool(print_uploads.result_fields, state), last_progress, sent_at):
+                if not ready:
+                    sent_at = time.monotonic()
+                    yield out(value)
+                else:
+                    line.update(value)
             if with_stl:
                 def encoded_stl():
                     return base64.b64encode(print_jobs.get_stl(job_id)).decode()
