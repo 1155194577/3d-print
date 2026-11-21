@@ -67,3 +67,26 @@ def test_server_repairs_or_refuses():
     with pytest.raises(HTTPException) as exc:
         api._check_printable(box(300, 50, 50).export(file_type="stl"), (220, 220, 250))
     assert exc.value.status_code == 422 and "bed" in exc.value.detail
+
+
+def test_sealed_cavity_is_not_a_floating_part():
+    inner = box(10, 10, 10).apply_translation([0, 0, 5])
+    inner.invert()
+    hollow = trimesh.util.concatenate([box(30, 30, 30), inner])
+    r = p.check(hollow)
+    assert r["parts"] == 2 and not any("float" in w for w in r["warnings"])
+    assert p.fix(hollow).volume == pytest.approx(30 ** 3 - 10 ** 3, rel=1e-6)
+
+
+def test_fit_bed_allows_stl_rounding():
+    assert p.check(box(220.00002, 100, 50), bed=(220, 220, 250))["printable"]
+
+
+def test_tiny_model_wall_check_is_cheap():
+    import tracemalloc
+
+    tracemalloc.start()
+    r = p.check(box(1, 1, 1))
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert r["min_wall_mm"] is not None and peak < 200e6

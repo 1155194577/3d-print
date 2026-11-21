@@ -15,6 +15,7 @@ MIN_WALL_MM = 0.8  # two perimeters of a 0.4 mm nozzle
 OVERHANG_DEG = 45.0
 BED_TOL_MM = 0.5
 CONTACT_TOL_MM = 0.05
+FIT_TOL_MM = 0.1  # STL's float32 vertices can nudge a model fitted to the bed just past it
 PLA_G_CM3 = 1.24
 
 
@@ -43,7 +44,7 @@ def check(m, bed=None, wall_samples=1500, seed=0):
 
     # ---- shells: every part must stand on the bed ----
     parts = m.split(only_watertight=False)
-    floating = [p for p in parts if p.bounds[0, 2] - z0 > BED_TOL_MM]
+    floating = _floating(parts, z0)
     if floating:
         warnings.append(f"{len(floating)} part(s) float above the bed: print with supports")
     elif len(parts) > 1:
@@ -51,7 +52,7 @@ def check(m, bed=None, wall_samples=1500, seed=0):
 
     # ---- size ----
     if bed is not None:
-        if any(e > b + 1e-6 for e, b in zip(sorted(ex[:2]) + [ex[2]], sorted(bed[:2]) + [bed[2]])):
+        if any(e > b + FIT_TOL_MM for e, b in zip(sorted(ex[:2]) + [ex[2]], sorted(bed[:2]) + [bed[2]])):
             errors.append(f"{ex[0]:.0f}×{ex[1]:.0f}×{ex[2]:.0f} mm does not fit the "
                           f"{bed[0]:g}×{bed[1]:g}×{bed[2]:g} bed")
     elif any(e > b for e, b in zip(sorted(ex[:2]) + [ex[2]], COMMON_BED)):
@@ -115,10 +116,10 @@ def fix(m):
     """One repair pass for what `check` calls errors: drop floating parts, close holes, fix normals."""
     import trimesh
 
-    z0 = m.bounds[0, 2]
-    parts = [p for p in m.split(only_watertight=False) if p.bounds[0, 2] - z0 <= BED_TOL_MM]
-    if parts:
-        m = trimesh.util.concatenate(parts)
+    parts = m.split(only_watertight=False)
+    floating = {id(p) for p in _floating(parts, m.bounds[0, 2])}
+    if len(floating) < len(parts):
+        m = trimesh.util.concatenate([p for p in parts if id(p) not in floating])
     if not m.is_watertight or not m.is_winding_consistent:
         try:
             import pymeshfix
@@ -130,6 +131,12 @@ def fix(m):
             pass
     trimesh.repair.fix_normals(m)
     return m
+
+
+def _floating(parts, z0):
+    """Parts that don't reach the bed. An inward-facing shell is a sealed cavity, not a part."""
+    return [p for p in parts if p.bounds[0, 2] - z0 > BED_TOL_MM
+            and not (p.is_watertight and p.volume < 0)]
 
 
 def _wall_thickness(m, probes, seed, reach=3.0):
@@ -147,8 +154,8 @@ def _wall_thickness(m, probes, seed, reach=3.0):
     tree = cKDTree(pts)
     k = min(probes, n)
     out = np.full(k, reach)
-    for i, nb in enumerate(tree.query_ball_point(pts[:k], reach)):
-        nb = np.asarray(nb)
+    for i in range(k):  # one probe at a time: on a small model every sample is within reach
+        nb = np.asarray(tree.query_ball_point(pts[i], reach))
         if len(nb) == 0:
             continue
         depth = -(pts[nb] - pts[i]) @ nrm[i]  # how far behind the probe's surface
