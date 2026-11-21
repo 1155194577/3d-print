@@ -184,3 +184,14 @@ def test_registration_requires_auth(s3_client, monkeypatch):
     _, client = s3_client
     monkeypatch.setenv("PRINT_API_TOKEN", "test-token")
     assert client.post("/print/uploads", json={}).status_code == 401
+
+
+@pytest.mark.parametrize("content_type,suffix", [
+    ("model/vnd.usdz+zip", ".usdz"), ("application/x-ply", ".ply"), ("model/obj", ".obj"),
+    ("application/octet-stream", ".obj")])
+def test_mesh_key_suffix_follows_content_type(s3_client, content_type, suffix):
+    _, client = s3_client
+    response = client.post("/print/uploads", json={"files": {"mesh": {"size": 10, "content_type": content_type}}})
+    assert response.status_code == 200, response.text
+    path = unquote(urlparse(response.json()["uploads"]["mesh"]["url"]).path)
+    assert path.endswith("/mesh/mesh" + suffix)
