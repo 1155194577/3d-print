@@ -12,6 +12,7 @@ repair, flatten, base plate, real-world scaling.
 triposr photo.jpg                    # → photo.stl, 200 mm max dimension
 triposr photo.jpg --height 120       # exactly 120 mm tall
 triposr photo.jpg --fit-bed 220x220x250
+triposr scan.usdz                    # LiDAR scan (USDZ/OBJ/PLY, metres): real size, no TripoSR
 ```
 
 ## Contents
@@ -22,6 +23,8 @@ triposr photo.jpg --fit-bed 220x220x250
 | `tools/img2mesh.py` | The pipeline: TripoSR call → scale → flatten → repair → base plate → export |
 | `tools/preview_stl.py` | Optional: render an STL to three orthographic PNG views for a quick look |
 | `server/` | FastAPI web app: upload a photo in the browser, watch progress, download the STL |
+| `server/print_api.py` | `POST /print`: LiDAR mesh or photo + height in, STL out (contract in `server/README.md`) |
+| `deploy/modal_app.py` | Deploys the web app and `/print` on Modal (serverless GPU) |
 | `research/triposr/` | Upstream TripoSR source (`run.py`, `tsr/`), MIT licensed |
 | `research/triposr_requirements.txt` | Exact pinned dependency set that is known to work |
 | `setup.sh` | Builds the conda env `triposr` from scratch |
@@ -122,6 +125,7 @@ python -m uvicorn server.app:app --host 0.0.0.0 --port 6006
 | `GET /api/jobs/{id}/model` | finished STL |
 | `GET /api/jobs/{id}/preview.png` | three-view render |
 | `GET /api/health` | liveness and whether the pipeline binary is present |
+| `POST /print` | synchronous: LiDAR mesh, or photo + `height_mm`, → STL; see [`server/README.md`](server/README.md) |
 
 Design notes: jobs run **one at a time** — TripoSR loads a ~1.5 GB model onto the
 GPU per invocation, so parallel jobs would thrash memory rather than speed up.
@@ -130,7 +134,7 @@ number, so a renamed binary is rejected before it reaches the pipeline. Jobs and
 their files expire after `TRIPOSR_JOB_TTL_MIN` (default 120).
 
 ```bash
-python -m pytest server/tests -q      # 11 tests, ~3 s, no GPU
+python -m pytest server/tests -q      # no GPU needed
 ```
 
 ## What it does, stage by stage
@@ -158,6 +162,8 @@ python -m pytest server/tests -q      # 11 tests, ~3 s, no GPU
 | `--size MM` | scale so the largest dimension is this (default 200) |
 | `--fit-bed WxDxH` | scale to `--size` (default 200 mm), then shrink only if needed to fit, including the base plate |
 | `--no-base` | skip the base plate |
+| `--units m\|cm\|mm` | mesh input only: file units, kept at real size (default m; USDZ uses its own) |
+| `--up y\|z` | mesh input only: up axis (default y, as ARKit exports; USDZ uses its own) |
 | `--base-thickness MM` | plate thickness, default 3 |
 | `--mc-resolution N` | 256 default; 320–512 = finer geometry, slower |
 | `--chunk-size N` | lower if you run out of memory |

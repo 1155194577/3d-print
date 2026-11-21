@@ -75,15 +75,94 @@ def find_mesh(workdir, index):
     return None
 
 
-def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
-                 base_plate=True, base_thickness=3.0, target_format="stl"):
-    """Scale, flatten, base-plate, repair. Returns (mesh, report)."""
+USD_EXTS = (".usdz", ".usd", ".usdc", ".usda")
+MESH_EXTS = (".obj", ".ply", ".usdz", ".usd", ".usdc", ".usda", ".glb", ".gltf", ".stl", ".off")
+UNITS_TO_MM = {"m": 1000.0, "cm": 10.0, "mm": 1.0}
+
+
+def is_mesh_file(path):
+    return os.path.splitext(path)[1].lower() in MESH_EXTS
+
+
+def _load_usd(path):
+    """Read every UsdGeom.Mesh in a USD/USDZ stage, in metres, Z-up."""
+    import numpy as np
+    import trimesh
+    try:
+        from pxr import Usd, UsdGeom
+    except ImportError:
+        raise SystemExit("USD/USDZ input needs the usd-core package (pip install usd-core)")
+
+    stage = Usd.Stage.Open(path)
+    if stage is None:
+        raise SystemExit(f"Could not open USD file: {path}")
+    metres = UsdGeom.GetStageMetersPerUnit(stage) or 1.0
+    cache = UsdGeom.XformCache()
+    parts = []
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        mesh = UsdGeom.Mesh(prim)
+        pts = mesh.GetPointsAttr().Get()
+        counts = mesh.GetFaceVertexCountsAttr().Get()
+        idx = mesh.GetFaceVertexIndicesAttr().Get()
+        if not pts or not counts or not idx:
+            continue
+        pts = np.asarray(pts, dtype=np.float64)
+        xf = np.asarray(cache.GetLocalToWorldTransform(prim), dtype=np.float64)
+        pts = pts @ xf[:3, :3] + xf[3, :3]  # USD matrices are row-vector
+        idx = np.asarray(idx, dtype=np.int64)
+        faces, start = [], 0
+        for c in counts:  # fan-triangulate quads/ngons
+            for k in range(1, c - 1):
+                faces.append((idx[start], idx[start + k], idx[start + k + 1]))
+            start += c
+        parts.append(trimesh.Trimesh(vertices=pts, faces=faces, process=False))
+    if not parts:
+        raise SystemExit(f"No mesh geometry in {path}")
+    m = trimesh.util.concatenate(parts)
+    m.apply_scale(metres)
+    up = UsdGeom.GetStageUpAxis(stage)
+    return m, ("z" if up == UsdGeom.Tokens.z else "y")
+
+
+def load_mesh(src_path, up_axis="z"):
+    """Load any supported mesh and return it Z-up (the pipeline's convention).
+
+    USD/USDZ carry their own units and up axis, which override `up_axis`;
+    the result is then in metres. Other formats keep their file units.
+    """
     import numpy as np
     import trimesh
 
-    m = trimesh.load(src_path, force="mesh")
-    if isinstance(m, trimesh.Scene):
-        m = trimesh.util.concatenate(m.dump())
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext in USD_EXTS:
+        m, up_axis = _load_usd(src_path)
+    else:
+        m = trimesh.load(src_path, force="mesh")
+        if isinstance(m, trimesh.Scene):
+            m = trimesh.util.concatenate(m.dump())
+    if up_axis == "y":  # ARKit / glTF convention: rotate Y-up to Z-up
+        m.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
+    elif up_axis != "z":
+        raise SystemExit(f"up axis must be y or z, got {up_axis!r}")
+    return m
+
+
+def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
+                 base_plate=True, base_thickness=3.0, target_format="stl",
+                 units_to_mm=None, up_axis="z"):
+    """Scale, flatten, base-plate, repair. Returns (mesh, report).
+
+    With `units_to_mm` (e.g. 1000 for a LiDAR scan in metres) and no
+    `height`/`size`, the mesh keeps its real size instead of the 200 mm default.
+    """
+    import numpy as np
+    import trimesh
+
+    m = load_mesh(src_path, up_axis)
+    if units_to_mm and os.path.splitext(src_path)[1].lower() in USD_EXTS:
+        units_to_mm = 1000.0  # load_mesh already converted the stage to metres
     if len(m.faces) == 0:
         raise SystemExit(f"Empty mesh: {src_path}")
 
@@ -102,6 +181,9 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
             raise SystemExit("Height must exceed the base plate's thickness")
         m.apply_scale((height - plate_height) / cur)
         scale_note = f"height → {height:g} mm"
+    elif units_to_mm and not size:
+        m.apply_scale(units_to_mm)
+        scale_note = f"real size (×{units_to_mm:g} to mm)"
     else:
         target = size if size else 200.0
         factor = target / m.extents.max()
@@ -252,8 +334,12 @@ def main():
   triposr mug.jpg -o /tmp/mug.stl --size 90 --no-base
   triposr shoe.jpg --mc-resolution 320 --texture    # finer geometry + texture
   triposr part.jpg --fit-bed 220x220x250  # shrink to a K1C build plate
+  triposr scan.usdz                       # LiDAR scan → real-size STL, no TripoSR
+  triposr scan.ply --units m --up y       # same for OBJ/PLY (these are the defaults)
 """)
-    ap.add_argument("images", nargs="+", help="input image(s): jpg/png/webp")
+    ap.add_argument("images", nargs="+", metavar="input",
+                    help="input image(s) (jpg/png/webp), or scanned mesh(es) "
+                         "(obj/ply/usdz/glb/stl), which skip TripoSR")
     ap.add_argument("-o", "--output", help="output path (single image only)")
     ap.add_argument("--outdir", default=".", help="output directory (default: .)")
     ap.add_argument("--height", type=float, help="scale to this total height including the base plate (mm)")
@@ -273,6 +359,11 @@ def main():
                     help="how much of the frame the subject should fill (default 0.85)")
     ap.add_argument("--format", default="stl", choices=["stl", "obj", "glb"],
                     help="output format (default stl; obj/glb keep vertex colors)")
+    ap.add_argument("--units", default="m", choices=sorted(UNITS_TO_MM),
+                    help="units of a mesh input without --height/--size (default m, as LiDAR "
+                         "scans are); kept at real size. USDZ uses its own units")
+    ap.add_argument("--up", default="y", choices=["y", "z"],
+                    help="up axis of a mesh input (default y, as ARKit exports); USDZ uses its own")
     ap.add_argument("--device", default=None, help="torch device (default: auto mps/cuda/cpu)")
     ap.add_argument("--keep-obj", action="store_true", help="keep TripoSR's raw mesh.obj next to the output")
     ap.add_argument("--quiet", action="store_true", help="only print the output paths")
@@ -284,13 +375,13 @@ def main():
     args.images = [os.path.abspath(p) for p in args.images]
     for img in args.images:
         if not os.path.isfile(img):
-            raise SystemExit(f"error: no such image: {img}")
+            raise SystemExit(f"error: no such file: {img}")
     if args.output and len(args.images) > 1:
         raise SystemExit("error: -o works with a single image; use --outdir for batches")
 
     # device
     device = args.device
-    if not device:
+    if not device and not all(is_mesh_file(p) for p in args.images):
         import torch
         device = "mps" if torch.backends.mps.is_available() else (
             "cuda:0" if torch.cuda.is_available() else "cpu")
@@ -311,18 +402,22 @@ def main():
 
     try:
         for idx, img in enumerate(args.images):
-            # One image per TripoSR process: two images at once gets OOM-killed
-            # on an 18-24 GB Mac.
-            sub = os.path.join(workdir, str(idx))
-            os.makedirs(sub, exist_ok=True)
-            run_triposr([img], sub, device, args.mc_resolution, args.texture,
-                        args.texture_resolution, args.no_remove_bg,
-                        args.foreground_ratio, args.chunk_size)
+            scanned = is_mesh_file(img)
+            if scanned:
+                src = img
+            else:
+                # One image per TripoSR process: two images at once gets
+                # OOM-killed on an 18-24 GB Mac.
+                sub = os.path.join(workdir, str(idx))
+                os.makedirs(sub, exist_ok=True)
+                run_triposr([img], sub, device, args.mc_resolution, args.texture,
+                            args.texture_resolution, args.no_remove_bg,
+                            args.foreground_ratio, args.chunk_size)
 
-            src = find_mesh(sub, 0)
-            if not src:
-                print(f"warning: TripoSR produced no mesh for {img}", file=sys.stderr)
-                continue
+                src = find_mesh(sub, 0)
+                if not src:
+                    print(f"warning: TripoSR produced no mesh for {img}", file=sys.stderr)
+                    continue
 
             mesh, report = prepare_mesh(
                 src,
@@ -332,6 +427,8 @@ def main():
                 base_plate=not args.no_base,
                 base_thickness=args.base_thickness,
                 target_format=args.format,
+                units_to_mm=UNITS_TO_MM[args.units] if scanned else None,
+                up_axis=args.up if scanned else "z",
             )
 
             if args.output:
@@ -339,10 +436,12 @@ def main():
             else:
                 stem = os.path.splitext(os.path.basename(img))[0]
                 out_path = os.path.join(args.outdir, f"{stem}.{args.format}")
+                if os.path.abspath(out_path) == os.path.abspath(img):
+                    out_path = os.path.join(args.outdir, f"{stem}_print.{args.format}")
 
             mesh.export(out_path)
 
-            if args.keep_obj:
+            if args.keep_obj and not scanned:
                 keep = os.path.splitext(out_path)[0] + "_raw.obj"
                 shutil.copy(src, keep)
                 report["raw_copy"] = keep
