@@ -170,6 +170,37 @@ flushed as it goes:
 - The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either means the connection dropped, not that the print failed: resume it.
 - Optional form field `job_id` (a UUID the app picks). A retry with the same id joins that job instead of starting a second print.
 
+For large captures, upload directly to S3 before starting the print (all API calls
+use the same Bearer token):
+
+1. `POST /print/uploads` with JSON, for example
+   `{"job_id":"<optional UUID>","files":{"photo":{"content_type":"image/jpeg","size":12345,"filename":"face.jpg"}}}`.
+   Allowed names are `photo`, `mesh`, `depth`, `depth_confidence`, `face_vertices`.
+   Sizes must be positive integers within `PRINT_MAX_UPLOAD_MB` (200 MB by default,
+   per file). Invalid names, sizes or UUIDs return 400. The response is
+   `{"job_id":"<UUID>","expires_in":900,"uploads":{"photo":{"url":"<presigned URL>","method":"PUT","headers":{"Content-Type":"image/jpeg"}}}}`.
+2. PUT each file to its URL with exactly the returned headers. Content-Type is
+   signed (SigV4). URLs expire after 15 minutes; expired PUTs return S3 HTTP 403.
+   Repeating step 1 with the same job ID refreshes URLs for that job and replaces
+   that file's object, rather than allocating another print job.
+3. `POST /print` with form fields `job_id=<returned UUID>`,
+   `uploaded=photo,depth,face_vertices` (only the names actually uploaded), and the
+   usual capture/calibration/sizing fields. No file parts are needed. The server
+   checks every listed object before accepting and runs the same validation and
+   GPU pipeline as multipart. Missing depth returns HTTP 409 with
+   `{"detail":"upload missing: depth","missing":["depth"]}`; already uploaded
+   parts are retained so the client can finish uploading and retry. A file part
+   and the same name in `uploaded` return 400. Actual file sizes must match their
+   declared sizes. Normal NDJSON acceptance/progress/results are unchanged.
+
+Objects are removed after dispatch or validation failure. S3 should also have a
+one-day expiration rule for `uploads/` as a backstop for abandoned uploads and
+late PUTs. Modal's CPU `web` needs secret `3d-print-s3` containing
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `PRINT_S3_BUCKET`;
+the GPU worker does not receive those credentials. Legacy multipart requests
+continue to work unchanged. For local tests install
+`server/requirements-test.txt` (moto is test-only).
+
 Resuming, from any container, for 24 h after the job starts (unknown or expired ids are 404):
 
 | Route | Answer |

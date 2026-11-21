@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 
-from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from fastapi.concurrency import run_in_threadpool
@@ -35,7 +35,7 @@ import img2mesh  # noqa: E402
 import photo_level  # noqa: E402
 import printability  # noqa: E402
 
-from server import print_jobs  # noqa: E402
+from server import print_jobs, print_uploads  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,12 @@ class PrintRoute(APIRoute):
 
         async def logged(request):
             try:
-                return await handler(request)
+                _check_auth(request.headers.get("authorization"))
+                async with print_uploads.resolve(request, MAX_UPLOAD_BYTES):
+                    return await handler(request)
+            except print_uploads.MissingUploads as exc:
+                _log_rejection(request, exc.status_code, exc.detail)
+                return JSONResponse({"detail": exc.detail, "missing": exc.missing}, status_code=409)
             except StarletteHTTPException as exc:
                 if 400 <= exc.status_code < 500:
                     _log_rejection(request, exc.status_code, exc.detail)
@@ -217,9 +222,16 @@ def _parse_bed(fit_bed):
         raise HTTPException(400, "fit_bed wants WxDxH in mm, e.g. 220x220x250")
 
 
+@router.post("/print/uploads")
+def print_upload_urls(payload: object = Body(...), authorization: str | None = Header(None)):
+    _check_auth(authorization)
+    return print_uploads.register(payload, MAX_UPLOAD_BYTES)
+
+
 @router.post("/print", response_class=Response,
           responses={200: {"content": {"model/stl": {}}}})
 def print_stl(
+    request: Request,
     mesh: UploadFile | None = File(None, description="LiDAR scan: usdz/obj/ply/glb/stl"),
     photo: UploadFile | None = File(None, description="photo: jpg/png/webp"),
     mode: str = Form("object", pattern="^(object|face)$"),
@@ -240,10 +252,14 @@ def print_stl(
     image_orientation: int | None = Form(None),
     object_points: str | None = Form(None, description="[[u, v], ...] taps on the object, photo px"),
     job_id: str | None = Form(None, description="client-chosen UUID; a retry with it joins the job"),
+    uploaded: str | None = Form(None, description="comma-separated names uploaded with /print/uploads"),
     authorization: str | None = Header(None),
     accept: str | None = Header(None),
 ):
     _check_auth(authorization)
+    join_id = getattr(request.state, "print_join_job_id", None)
+    if join_id is not None:
+        return _job_response(join_id, accept)
     if (mesh is None) == (photo is None):
         raise HTTPException(400, "send exactly one of `mesh` or `photo`")
     if mode == "face" and photo is None:
@@ -315,6 +331,10 @@ def print_stl(
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
+    return _job_response(job_id, accept)
+
+
+def _job_response(job_id, accept):
     if _wants_ndjson(accept):
         return _ndjson(_events(job_id, accepted=True, with_stl=True))
     state = print_jobs.get_state(job_id)

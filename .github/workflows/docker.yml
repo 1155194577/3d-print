@@ -30,7 +30,8 @@ jobs:
           cache-dependency-path: |
             research/triposr_requirements.txt
             server/requirements-web.txt
-      - run: pip install -r research/triposr_requirements.txt -r server/requirements-web.txt
+            server/requirements-test.txt
+      - run: pip install -r research/triposr_requirements.txt -r server/requirements-web.txt -r server/requirements-test.txt
       - run: python -m pytest server/tests -q
 
   image:

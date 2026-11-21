@@ -119,7 +119,7 @@ class PhotoCheckVLM:
     min_containers=1,
     timeout=1800,
     scaledown_window=300,
-    secrets=[modal.Secret.from_name("3d-print-api")],
+    secrets=[modal.Secret.from_name("3d-print-api"), modal.Secret.from_name("3d-print-s3")],
 )
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()
