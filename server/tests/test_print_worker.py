@@ -93,6 +93,27 @@ def test_worker_preserves_http_error(pool, job):
     assert exc.value.status_code == 422
 
 
+def test_completed_job_heartbeats_repeat_last_replayed_stage(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(api, "HEARTBEAT_S", 0.03)
+    monkeypatch.setattr(print_jobs, "get_state", lambda _: dict(
+        type="done", history=list(api.STAGES), created=now - 30, updated=now,
+        report={}, filename="a.stl"))
+
+    def stl(_):
+        time.sleep(0.2)
+        return b"stl"
+
+    monkeypatch.setattr(print_jobs, "get_stl", stl)
+    events = asyncio.run(collect_events(True))
+    progress = [event for event in events if event["type"] == "progress"]
+    values = [event["progress"] for event in progress]
+    assert values == sorted(values)
+    assert all(event["stage"] == "check" for event in progress[len(api.STAGES):])
+    assert all(event["elapsed_s"] >= 30 for event in progress)
+    assert events[-1]["type"] == "done"
+
+
 def test_native_worker_exit_is_a_recoverable_error(pool, job):
     crashed = pool.submit(os._exit, 17)
     with pytest.raises(Exception):

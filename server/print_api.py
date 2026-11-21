@@ -562,13 +562,14 @@ async def _events(job_id, accepted, with_stl):
             yield out({"type": "error", "status": 404, "detail": "the print job expired"})
             return
         history, running = state.get("history", []), state["type"] == "progress"
-        if running:
-            last_progress = state
         if sent is None:
             sent = len(history) - running
         for stage in history[sent:len(history) - running]:
-            yield out(_line(dict(state, type="progress", stage=stage, since=time.time())))
+            last_progress = dict(state, type="progress", stage=stage, since=time.time())
+            yield out(_line(last_progress))
             sent_at = time.monotonic()
+        if running:
+            last_progress = state
         sent = max(sent, len(history) - running)
         line = _line(state)
         if state["type"] == "done":
