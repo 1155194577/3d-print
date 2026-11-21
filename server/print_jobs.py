@@ -5,6 +5,8 @@ memory locally), so the app can drop the POST, come back later and pick the job 
 container. Keys: `<id>` holds the state dict, `<id>:stl:<n>` the finished STL in chunks.
 """
 
+import logging
+import os
 import threading
 import time
 
@@ -114,10 +116,22 @@ def run_existing(job_id, run):
                 save(stage="received", since=time.time(), history=state["history"] + ["received"])
             body, report = run(lambda stage: save(stage=stage, since=time.time(),
                                                   history=state["history"] + [stage]))
+            result = {}
+            if os.environ.get("PRINT_S3_BUCKET"):
+                from server import print_uploads
+
+                key = f"results/{job_id}/model.stl"
+                try:
+                    print_uploads.client().put_object(Bucket=print_uploads.bucket(), Key=key,
+                                                      Body=body, ContentType="model/stl")
+                    result["stl_file_id"] = key
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("could not upload STL result job_id=%s error=%s",
+                                                       job_id, type(exc).__name__)
             chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
             for i, chunk in enumerate(chunks):
                 store.put(f"{job_id}:stl:{i}", chunk)
-            save(type="done", report=report, stl_chunks=len(chunks))
+            save(type="done", report=report, stl_chunks=len(chunks), **result)
         except HTTPException as exc:
             save(type="error", status=exc.status_code, detail=exc.detail)
         except Exception as exc:  # a bug, not the client's fault

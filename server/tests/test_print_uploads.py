@@ -1,14 +1,19 @@
+import base64
 import json
+from datetime import datetime, timezone
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, unquote, urlparse
 import uuid
 
 import boto3
 from fastapi.testclient import TestClient
 from moto import mock_aws
+from botocore.exceptions import ClientError
 import numpy as np
 import pytest
+import requests
 
-from server import print_api as api, print_jobs
+from server import print_api as api, print_jobs, print_uploads
 from server.tests.test_face import FakeFace, face_frame, photo_bytes
 
 
@@ -67,6 +72,9 @@ def test_presign_shape_and_repeat_same_job(s3_client):
     assert "content-type" in query["X-Amz-SignedHeaders"][0].split(";")
     assert "content-length" in query["X-Amz-SignedHeaders"][0].split(";")
     key = put(s3, first, "photo", b"first")
+    assert upload["file_id"] == key
+    assert requests.get(upload["get_url"]).content == b"first"
+    assert parse_qs(urlparse(upload["get_url"]).query)["X-Amz-Expires"] == ["3600"]
     second = register(client, files, first["job_id"])
     assert second["job_id"] == first["job_id"]
     assert put(s3, second, "photo", b"other") == key
@@ -132,10 +140,6 @@ def test_two_step_face_matches_multipart(s3_client, monkeypatch, accept):
     report = ([json.loads(line) for line in response.text.splitlines()][-1]["report"]
               if accept == "application/x-ndjson" else json.loads(response.headers["X-Print-Report"]))
     assert report == json.loads(legacy.headers["X-Print-Report"])
-    assert keys(s3, registration["job_id"]) == []
-    refreshed = register(client, files, registration["job_id"])
-    for name, (_, body, _) in files.items():
-        put(s3, refreshed, name, body)
     assert keys(s3, registration["job_id"])
     original = print_jobs.get_state(registration["job_id"])
     retry = client.post("/print", data={**data, "job_id": registration["job_id"],
@@ -146,18 +150,7 @@ def test_two_step_face_matches_multipart(s3_client, monkeypatch, accept):
     assert events[-1]["type"] == "done"
     assert events[-1]["report"] == report
     assert print_jobs.get_state(registration["job_id"]) == original
-    assert keys(s3, registration["job_id"]) == []
-
-
-@pytest.mark.parametrize("data", [{"mode": "face", "face_transform": "bad"},
-                                   {"mode": "not-a-mode"}, {"uploaded": "unknown"}])
-def test_validation_failure_removes_objects(s3_client, data):
-    s3, client = s3_client
-    registration = register(client, {"photo": ("a.jpg", b"jpeg", "image/jpeg")})
-    put(s3, registration, "photo", b"jpeg")
-    response = client.post("/print", data={"job_id": registration["job_id"], "uploaded": "photo", **data})
-    assert response.status_code in (400, 422)
-    assert keys(s3, registration["job_id"]) == []
+    assert keys(s3, registration["job_id"])
 
 
 def test_conflicting_part_rejected(s3_client):
@@ -168,7 +161,7 @@ def test_conflicting_part_rejected(s3_client):
                            files={"photo": ("a.jpg", b"jpeg")})
     assert response.status_code == 400
     assert "not both" in response.json()["detail"]
-    assert keys(s3, registration["job_id"]) == []
+    assert keys(s3, registration["job_id"])
 
 
 def test_actual_size_is_checked(s3_client):
@@ -177,13 +170,127 @@ def test_actual_size_is_checked(s3_client):
     put(s3, registration, "photo", b"more bytes than declared")
     response = client.post("/print", data={"job_id": registration["job_id"], "uploaded": "photo"})
     assert response.status_code == 400
-    assert keys(s3, registration["job_id"]) == []
+    assert keys(s3, registration["job_id"])
 
 
 def test_registration_requires_auth(s3_client, monkeypatch):
     _, client = s3_client
     monkeypatch.setenv("PRINT_API_TOKEN", "test-token")
     assert client.post("/print/uploads", json={}).status_code == 401
+
+
+def test_preview_only_existing_manifest_objects(s3_client):
+    s3, client = s3_client
+    files = {"photo": ("a.jpg", b"jpeg", "image/jpeg"), "depth": ("a.f32", b"1234", "application/octet-stream")}
+    registration = register(client, files)
+    key = put(s3, registration, "photo", b"jpeg")
+    response = client.get("/print/uploads/" + registration["job_id"])
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_id"] == registration["job_id"]
+    assert set(data["files"]) == {"photo"}
+    entry = data["files"]["photo"]
+    assert set(entry) == {"file_id", "size", "get_url"}
+    assert entry["file_id"] == key and entry["size"] == 4
+    assert parse_qs(urlparse(entry["get_url"]).query)["X-Amz-Expires"] == ["3600"]
+    assert requests.get(entry["get_url"]).content == b"jpeg"
+    assert client.get("/print/uploads/" + str(uuid.uuid4())).status_code == 404
+    assert client.get("/print/uploads/bad").status_code == 400
+
+
+@pytest.mark.parametrize("accept", ["application/x-ndjson", "model/stl"])
+def test_additive_result_stores_stl_and_reissues_links(s3_client, monkeypatch, accept):
+    s3, client = s3_client
+    body, report = b"solid model\nendsolid model\n", {"watertight": True}
+    monkeypatch.setattr(api, "execute_job", lambda job, progress: (body, report))
+    registration = register(client, {"photo": ("a.jpg", b"jpeg", "image/jpeg")})
+    put(s3, registration, "photo", b"jpeg")
+    data = dict(job_id=registration["job_id"], uploaded="photo")
+    response = client.post("/print", data=data, headers={"Accept": accept})
+    assert response.status_code == 200
+    if accept == "application/x-ndjson":
+        result = json.loads(response.text.splitlines()[-1])
+        assert result["report"] == report
+        assert base64.b64decode(result["stl_base64"]) == body
+    else:
+        assert response.content == body
+        assert json.loads(response.headers["X-Print-Report"]) == report
+        result = {"stl_url": response.headers["X-STL-URL"],
+                  "stl_file_id": response.headers["X-STL-File-ID"],
+                  "stl_expires_in": int(response.headers["X-STL-Expires-In"])}
+    assert result["stl_expires_in"] == 3600
+    assert result["stl_file_id"] == f"results/{registration['job_id']}/model.stl"
+    stored = s3.get_object(Bucket="print-test-uploads", Key=result["stl_file_id"])
+    assert stored["Body"].read() == body
+    assert stored["ContentType"] == "model/stl"
+    with patch("botocore.auth.get_current_datetime", return_value=datetime(2030, 1, 1, tzinfo=timezone.utc)):
+        reissued = client.get("/print/" + registration["job_id"]).json()
+        binary = client.get("/print/" + registration["job_id"] + "/result")
+        replay = client.get("/print/" + registration["job_id"], headers={"Accept": "application/x-ndjson"})
+    assert reissued["type"] == "done"
+    assert reissued["stl_url"] != result["stl_url"]
+    assert parse_qs(urlparse(reissued["stl_url"]).query)["X-Amz-Expires"] == ["3600"]
+    assert binary.content == body and binary.headers["X-STL-URL"] == reissued["stl_url"]
+    assert json.loads(replay.text.splitlines()[-1])["stl_url"] == reissued["stl_url"]
+    retry = client.post("/print", data={"job_id": registration["job_id"], "uploaded": "photo"})
+    assert retry.status_code == 200 and retry.content == body
+    assert retry.headers["X-STL-File-ID"] == result["stl_file_id"]
+    assert keys(s3, registration["job_id"])
+
+
+def test_lifecycle_merges_existing_rules(s3_client):
+    s3, _ = s3_client
+    old = dict(ID="keep-me", Status="Enabled", Filter={"Prefix": "other/"}, Expiration={"Days": 30})
+    s3.put_bucket_lifecycle_configuration(Bucket="print-test-uploads", LifecycleConfiguration={"Rules": [old]})
+    assert print_uploads.configure_lifecycle()["configured"]
+    rules = s3.get_bucket_lifecycle_configuration(Bucket="print-test-uploads")["Rules"]
+    assert old in rules
+    assert {rule["Filter"]["Prefix"]: rule["Expiration"]["Days"] for rule in rules} == {
+        "other/": 30, "uploads/": 7, "results/": 7}
+
+
+def test_lifecycle_access_denied_is_nonfatal(monkeypatch):
+    s3 = Mock()
+    s3.get_bucket_lifecycle_configuration.side_effect = ClientError({"Error": {"Code": "AccessDenied"}},
+                                                                   "GetBucketLifecycleConfiguration")
+    monkeypatch.setattr(print_uploads, "client", lambda: s3)
+    monkeypatch.setenv("PRINT_S3_BUCKET", "print-test-uploads")
+    assert print_uploads.configure_lifecycle()["error"] == "AccessDenied"
+    s3.put_bucket_lifecycle_configuration.assert_not_called()
+
+
+@pytest.mark.parametrize("accept", ["application/x-ndjson", "model/stl"])
+def test_result_upload_error_keeps_legacy_payload(s3_client, monkeypatch, caplog, accept):
+    _, client = s3_client
+    monkeypatch.setattr(api, "execute_job", lambda job, progress: (b"stl", {}))
+    s3 = Mock()
+    s3.put_object.side_effect = ClientError({"Error": {"Code": "AccessDenied"}}, "PutObject")
+    monkeypatch.setattr(print_uploads, "client", lambda: s3)
+    response = client.post("/print", files={"photo": ("a.jpg", b"jpeg")}, headers={"Accept": accept})
+    assert response.status_code == 200
+    if accept == "application/x-ndjson":
+        done = json.loads(response.text.splitlines()[-1])
+        assert base64.b64decode(done["stl_base64"]) == b"stl"
+        assert not {"stl_url", "stl_file_id", "stl_expires_in"} & done.keys()
+    else:
+        assert response.content == b"stl" and "X-STL-URL" not in response.headers
+    assert "could not upload STL result" in caplog.text
+
+
+def test_unconfigured_s3_keeps_legacy_stream(s3_client, monkeypatch):
+    _, client = s3_client
+    monkeypatch.delenv("PRINT_S3_BUCKET")
+    monkeypatch.setattr(api, "execute_job", lambda job, progress: (b"stl", {}))
+    s3 = Mock()
+    monkeypatch.setattr(print_uploads, "client", s3)
+    response = client.post("/print", files={"photo": ("a.jpg", b"jpeg")},
+                           headers={"Accept": "application/x-ndjson"})
+    done = json.loads(response.text.splitlines()[-1])
+    assert set(done) == {"type", "report", "stl_base64", "elapsed_s", "filename", "progress"}
+    assert done["type"] == "done" and done["report"] == {}
+    assert base64.b64decode(done["stl_base64"]) == b"stl"
+    assert done["filename"] == "a.stl" and done["progress"] == 1.0
+    s3.assert_not_called()
 
 
 @pytest.mark.parametrize("content_type,suffix", [

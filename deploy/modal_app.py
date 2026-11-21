@@ -79,7 +79,8 @@ cpu_image = (
 app = modal.App("3d-print", image=cpu_image)
 
 
-@app.function(image=image, gpu="L4", timeout=600, scaledown_window=300)
+@app.function(image=image, gpu="L4", timeout=600, scaledown_window=300,
+              secrets=[modal.Secret.from_name("3d-print-s3")])
 def run_print(job_id, spec):
     import sys
     import tempfile

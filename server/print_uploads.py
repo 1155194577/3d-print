@@ -1,8 +1,8 @@
 """Presigned uploads, resolved into the same file parts as multipart requests."""
 
 from contextlib import asynccontextmanager
-import logging
 import mimetypes
+import logging
 import os
 from pathlib import PurePosixPath
 import tempfile
@@ -22,7 +22,6 @@ NAMES = {"photo", "mesh", "depth", "depth_confidence", "face_vertices"}
 SUFFIXES = {"image/jpeg": ".jpg", "model/vnd.usdz+zip": ".usdz", "model/vnd.pixar.usd": ".usdz",
             "application/x-ply": ".ply", "model/ply": ".ply", "model/obj": ".obj", "text/plain": ".obj"}
 EXPIRES_IN = 900
-logger = logging.getLogger(__name__)
 
 
 class MissingUploads(HTTPException):
@@ -91,7 +90,9 @@ def register(payload, limit):
         url = s3.generate_presigned_url("put_object", Params={"Bucket": target, "Key": entry["key"],
                                        "ContentType": entry["content_type"], "ContentLength": entry["size"]},
                                         ExpiresIn=EXPIRES_IN)
-        uploads[name] = dict(url=url, method="PUT", headers={"Content-Type": entry["content_type"]})
+        uploads[name] = dict(url=url, method="PUT", headers={"Content-Type": entry["content_type"]},
+                             file_id=entry["key"], get_url=s3.generate_presigned_url("get_object", Params={
+                                 "Bucket": target, "Key": entry["key"]}, ExpiresIn=3600))
     print_jobs.store.put(f"{job_id}:uploads", dict(created=time.time(), files={**previous["files"], **entries}))
     return dict(job_id=job_id, expires_in=EXPIRES_IN, uploads=uploads)
 
@@ -143,14 +144,61 @@ def open_files(job_id, names, limit):
         raise
 
 
-def delete_files(job_id):
+def preview(job_id):
+    job_id = job_uuid(job_id)
+    manifest = print_jobs.store.get(f"{job_id}:uploads") or {"files": {}}
+    files = {}
+    if manifest["files"]:
+        s3, target = client(), bucket()
+        for name, entry in manifest["files"].items():
+            try:
+                head = s3.head_object(Bucket=target, Key=entry["key"])
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+                    continue
+                raise
+            files[name] = dict(file_id=entry["key"], size=head["ContentLength"],
+                               get_url=s3.generate_presigned_url("get_object", Params={
+                                   "Bucket": target, "Key": entry["key"]}, ExpiresIn=3600))
+    if not files:
+        raise HTTPException(404, "no uploaded files for this job")
+    return dict(job_id=job_id, files=files)
+
+
+def result_fields(state):
+    key = state.get("stl_file_id")
+    if not key:
+        return {}
+    try:
+        url = client().generate_presigned_url("get_object", Params={
+            "Bucket": bucket(), "Key": key}, ExpiresIn=3600)
+        return dict(stl_url=url, stl_file_id=key, stl_expires_in=3600)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("could not sign STL result error=%s", type(exc).__name__)
+        return {}
+
+
+def configure_lifecycle():
     s3, target = client(), bucket()
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=target, Prefix=f"uploads/{job_id}/"):
-        objects = [{"Key": item["Key"]} for item in page.get("Contents", [])]
-        if objects:
-            response = s3.delete_objects(Bucket=target, Delete={"Objects": objects, "Quiet": True})
-            if response.get("Errors"):
-                raise RuntimeError("S3 did not delete all uploaded objects")
+    try:
+        try:
+            rules = s3.get_bucket_lifecycle_configuration(Bucket=target).get("Rules", [])
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "NoSuchLifecycleConfiguration":
+                raise
+            rules = []
+        ids = {"print-upload-expiration", "print-result-expiration"}
+        rules = [rule for rule in rules if rule.get("ID") not in ids]
+        preserved = len(rules)
+        for prefix, rule_id in (("uploads/", "print-upload-expiration"),
+                                ("results/", "print-result-expiration")):
+            rules.append(dict(ID=rule_id, Status="Enabled", Filter={"Prefix": prefix}, Expiration={"Days": 7}))
+        s3.put_bucket_lifecycle_configuration(Bucket=target, LifecycleConfiguration={"Rules": rules})
+        return dict(configured=True, preserved_rules=preserved, expiration_days=7)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "AccessDenied":
+            raise
+        return dict(configured=False, error="AccessDenied", operation=exc.operation_name)
 
 
 @asynccontextmanager
@@ -164,7 +212,7 @@ async def resolve(request, limit):
         yield
         return
     job_id = job_uuid(form.get("job_id"))
-    files, cleanup = {}, True
+    files = {}
     try:
         if not isinstance(uploaded, str):
             raise HTTPException(400, "uploaded must be a comma-separated list of file names")
@@ -178,20 +226,10 @@ async def resolve(request, limit):
             request.state.print_join_job_id = job_id
             yield
             return
-        try:
-            files = await run_in_threadpool(open_files, job_id, names, limit)
-        except MissingUploads:
-            cleanup = False
-            raise
+        files = await run_in_threadpool(open_files, job_id, names, limit)
         request._form = FormData([(key, value) for key, value in form.multi_items() if key not in names]
                                  + list(files.items()))
         yield
     finally:
         for upload in files.values():
             upload.file.close()
-        if cleanup:
-            try:
-                await run_in_threadpool(delete_files, job_id)
-            except Exception as exc:
-                code = getattr(exc, "response", {}).get("Error", {}).get("Code", type(exc).__name__)
-                logger.warning("could not remove S3 uploads for print job %s error=%s", job_id, code)
