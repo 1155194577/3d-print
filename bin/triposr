@@ -35,22 +35,22 @@ export MPLCONFIGDIR="${MPLCONFIGDIR:-$ROOT/research/mpl_cache}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore}"
 
+# Interpreter search order: explicit override, repo-local venv (the portable
+# install, used on Linux/GPU hosts), then the conda env.
+LOCAL_VENV_PY="$ROOT/.venv/bin/python"
 CONDA_PREFIX_DIR="${CONDA_PREFIX_DIR:-$HOME/miniconda3/envs/triposr}"
 CONDA_PY="$CONDA_PREFIX_DIR/bin/python"
-VENV_PY="$ROOT/research/triposr_env311/bin/python"
 
 if [ -n "${TRIPOSR_PYTHON:-}" ] && [ -x "$TRIPOSR_PYTHON" ]; then
     PY="$TRIPOSR_PYTHON"
+elif [ -x "$LOCAL_VENV_PY" ]; then
+    PY="$LOCAL_VENV_PY"
 elif [ -x "$CONDA_PY" ]; then
     PY="$CONDA_PY"
-elif [ -x "$VENV_PY" ]; then
-    PY="$VENV_PY"
 else
-    echo "error: no usable Python found for TripoSR." >&2
-    echo "       build the conda env with:" >&2
-    echo "         conda create -n triposr python=3.11" >&2
-    echo "         conda run -n triposr pip install -r research/triposr_requirements.txt" >&2
-    echo "         conda run -n triposr pip install git+https://github.com/tatsy/torchmcubes.git" >&2
+    echo "error: no Python environment found for TripoSR." >&2
+    echo "       run ./setup.sh  (it uses conda, or a .venv when conda is unavailable)" >&2
+    echo "       or point at an interpreter you built:  TRIPOSR_PYTHON=/path/to/python triposr photo.jpg" >&2
     exit 1
 fi
 

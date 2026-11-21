@@ -30,3 +30,6 @@ tools/OpenSCAD.app/
 research/triposr/examples/
 research/triposr/figures/
 research/triposr/gradio_app.py
+
+# uploaded images, generated models and previews
+server/jobs/

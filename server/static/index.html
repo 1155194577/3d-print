@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3d-print — photo → printable STL</title>
+<style>
+  :root {
+    --bg:#0f1216; --panel:#171c23; --line:#2a323d; --ink:#e8edf4;
+    --dim:#8b98a9; --accent:#4ea1ff; --ok:#38d39f; --err:#ff6b6b;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:32px 20px 64px; background:var(--bg); color:var(--ink);
+    font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  main { max-width:880px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 4px; letter-spacing:-.01em; }
+  h1 span { color:var(--dim); font-weight:400; }
+  p.lede { color:var(--dim); margin:0 0 24px; font-size:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; }
+  #drop {
+    border:1.5px dashed var(--line); border-radius:12px; padding:34px 20px;
+    text-align:center; cursor:pointer; transition:.15s; color:var(--dim);
+  }
+  #drop:hover, #drop.over { border-color:var(--accent); color:var(--ink); background:#1b222b; }
+  #drop strong { color:var(--ink); display:block; margin-bottom:4px; font-size:15px; }
+  #file { display:none; }
+  .bar { height:8px; background:#0c1014; border-radius:99px; overflow:hidden; margin:18px 0 8px; }
+  .bar > i { display:block; height:100%; width:0; background:linear-gradient(90deg,#2f7ddb,var(--accent));
+             transition:width .35s ease; }
+  .meta { display:flex; justify-content:space-between; font-size:13px; color:var(--dim); }
+  .meta b { color:var(--ink); font-weight:600; }
+  ol.stages { list-style:none; margin:18px 0 0; padding:0; font-size:13.5px; color:var(--dim); }
+  ol.stages li { padding:5px 0 5px 24px; position:relative; }
+  ol.stages li::before {
+    content:"○"; position:absolute; left:4px; color:var(--line); font-size:11px; top:8px;
+  }
+  ol.stages li.done { color:var(--ink); }
+  ol.stages li.done::before { content:"✓"; color:var(--ok); }
+  ol.stages li.active { color:var(--accent); }
+  ol.stages li.active::before { content:"◐"; color:var(--accent); }
+  #error {
+    display:none; margin-top:16px; padding:12px 14px; border-radius:10px;
+    background:#2a1618; border:1px solid #5c2a2e; color:#ffb4b4; font-size:13.5px;
+    white-space:pre-wrap;
+  }
+  #result { display:none; margin-top:20px; }
+  #result img { width:100%; border-radius:10px; border:1px solid var(--line); background:#fff; }
+  .actions { display:flex; gap:10px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+  .btn {
+    display:inline-block; padding:10px 18px; border-radius:9px; background:var(--accent);
+    color:#06121f; font-weight:600; text-decoration:none; font-size:14px; border:0; cursor:pointer;
+  }
+  .btn[disabled] { opacity:.45; cursor:not-allowed; }
+  .facts { font-size:13px; color:var(--dim); }
+  .facts b { color:var(--ink); }
+  pre#log {
+    margin:16px 0 0; padding:12px; background:#0c1014; border:1px solid var(--line);
+    border-radius:10px; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color:#9fb0c4; max-height:150px; overflow:auto; white-space:pre-wrap; display:none;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>3d-print <span>— photo → printable STL</span></h1>
+  <p class="lede">Upload one photo. TripoSR builds a mesh on the GPU, then it is scaled,
+    repaired, given a base plate and returned as a watertight STL. About 60–120&nbsp;s.</p>
+
+  <div class="card">
+    <div id="drop" role="button" tabindex="0">
+      <strong>Drop an image, or click to choose</strong>
+      JPEG · PNG · WebP · BMP &nbsp;·&nbsp; max 20 MB
+      <input id="file" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,image/*" />
+    </div>
+
+    <div class="bar"><i id="fill"></i></div>
+    <div class="meta">
+      <span id="stage">waiting for an image</span>
+      <span><b id="pct">0%</b> · <span id="elapsed">0.0s</span></span>
+    </div>
+
+    <ol class="stages" id="stages">
+      <li data-stage="generating">generate mesh (TripoSR)</li>
+      <li data-stage="preparing image">prepare image</li>
+      <li data-stage="extracting mesh">extract mesh</li>
+      <li data-stage="exporting">scale, repair, base plate</li>
+      <li data-stage="finalising">verify watertight</li>
+    </ol>
+
+    <div id="error"></div>
+
+    <div id="result">
+      <img id="preview" alt="three orthographic views of the generated model" />
+      <div class="actions">
+        <a class="btn" id="download" download>Download STL</a>
+        <span class="facts" id="facts"></span>
+      </div>
+    </div>
+
+    <pre id="log"></pre>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const drop = $('drop'), fileInput = $('file');
+let busy = false;
+
+const ORDER = ['generating','preparing image','extracting mesh','exporting','finalising'];
+
+function reset() {
+  $('error').style.display = 'none';
+  $('result').style.display = 'none';
+  $('log').style.display = 'none';
+  $('log').textContent = '';
+  $('fill').style.width = '0%';
+  $('pct').textContent = '0%';
+  $('stage').textContent = 'uploading…';
+  document.querySelectorAll('#stages li').forEach(li => li.className = '');
+}
+
+function fail(msg) {
+  busy = false;
+  $('stage').textContent = 'failed';
+  const box = $('error');
+  box.textContent = msg;
+  box.style.display = 'block';
+}
+
+function closeDrop() { drop.style.pointerEvents = busy ? 'none' : 'auto'; }
+
+drop.addEventListener('click', () => { if (!busy) fileInput.click(); });
+drop.addEventListener('keydown', (e) => {
+  if ((e.key === 'Enter' || e.key === ' ') && !busy) fileInput.click();
+});
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.add('over');
+}));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.remove('over');
+}));
+drop.addEventListener('drop', (e) => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f && !busy) upload(f);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0] && !busy) upload(fileInput.files[0]);
+});
+
+async function upload(file) {
+  busy = true; closeDrop();
+  reset();
+  $('stage').textContent = 'uploading ' + file.name;
+
+  const body = new FormData();
+  body.append('image', file, file.name);
+  let res;
+  try {
+    res = await fetch('/api/jobs', { method: 'POST', body });
+  } catch (err) {
+    return fail('network error: ' + err.message);
+  }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (_) {}
+    return fail('upload rejected (' + res.status + '): ' + detail);
+  }
+
+  const { id } = await res.json();
+  const started = Date.now();
+  const source = new EventSource('/api/jobs/' + id + '/events');
+
+  source.onmessage = (event) => {
+    const job = JSON.parse(event.data);
+    $('fill').style.width = job.progress + '%';
+    $('pct').textContent = job.progress + '%';
+    $('elapsed').textContent = job.elapsed_s.toFixed(1) + 's';
+    $('stage').textContent = job.message || job.stage;
+
+    const idx = ORDER.indexOf(job.stage);
+    document.querySelectorAll('#stages li').forEach((li) => {
+      const own = ORDER.indexOf(li.dataset.stage);
+      li.className = idx > own ? 'done' : (idx === own ? 'active' : '');
+    });
+
+    if (job.log && job.log.length) {
+      $('log').style.display = 'block';
+      $('log').textContent = job.log.join('\n');
+    }
+
+    if (job.status === 'done') {
+      source.close(); busy = false; closeDrop();
+      $('preview').src = job.preview_url || '';
+      $('preview').style.display = job.preview_url ? 'block' : 'none';
+      $('download').href = job.model_url;
+      const m = job.metrics || {};
+      const bits = [];
+      if (m.dimensions_mm) bits.push(m.dimensions_mm.map(v => v.toFixed(1)).join(' × ') + ' mm');
+      if (m.faces) bits.push(m.faces.toLocaleString() + ' faces');
+      if (m.volume_cm3) bits.push(m.volume_cm3 + ' cm³');
+      bits.push(m.watertight ? 'watertight ✓' : 'needs repair');
+      $('facts').innerHTML = bits.join(' · ');
+      $('result').style.display = 'block';
+      $('stage').textContent = 'model ready';
+    }
+
+    if (job.status === 'error') {
+      source.close();
+      fail(job.error || 'generation failed');
+    }
+  };
+
+  source.onerror = () => {
+    if (busy) { source.close(); fail('lost connection to the server'); }
+  };
+}
+</script>
+</body>
+</html>
