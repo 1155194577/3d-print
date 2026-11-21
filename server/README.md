@@ -3,8 +3,8 @@
 A LiDAR-scanned mesh, or a photo plus its measured height, in; a printable STL out.
 
 Served by the same FastAPI app as the `/api/jobs` web uploader (`server/app.py`); the
-route lives in `server/print_api.py`. The Modal deploy exposes only `/print` and
-`/api/health`.
+route lives in `server/print_api.py`. The Modal deploy exposes only `/print`,
+`/photo-check` and `/api/health`.
 
 ```bash
 python -m uvicorn server.app:app --port 6006   # local (CPU works, photos are slow)
@@ -17,6 +17,8 @@ modal deploy deploy/modal_app.py               # serverless GPU, see that file
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
+| `mode` | `object` \| `face` | `object` | Face mode requires a photo and produces a flat-cut bust. |
+| `face_transform` | JSON array of 16 floats | | Optional column-major `ARFaceAnchor.transform` in ARKit world coordinates (origin at head centre, +Y face up). Used only in face mode; requires `camera_transform` for depth fusion. |
 | `mesh` | file | | LiDAR scan: `.usdz`, `.obj`, `.ply` (also `.glb`, `.stl`). Skips TripoSR. |
 | `photo` | file | | `.jpg`, `.png` or `.webp` (not HEIC). EXIF rotation is honoured. |
 | `height_mm` | number > 0 | | Measured height of the object in mm. Photo: replaces the 200 mm default. Mesh: overrides the scan's real size. |
@@ -44,7 +46,9 @@ only a fallback), the seen side is the LiDAR surface, and TripoSR fills in the h
 | `depth_width`, `depth_height` | int | depth map size, e.g. 256 × 192 (raw depth only) |
 | `depth_confidence` | file `.u8`, optional | `confidenceMap`, uint8 0/1/2, same size; 0 is dropped |
 | `intrinsics` | JSON | `{"fx","fy","cx","cy","width","height"}` in photo pixels; scaled to the depth size |
-| `camera_transform` | JSON, optional | 16 floats, column-major camera-to-world (ARKit, world +Y up): gravity for the floor and upright, also supported for photo-only requests without depth |
+| `depth_intrinsics` | JSON, optional | Same keys, calibrated depth camera values in depth pixels. Width/height describe that calibration; scaled to the uploaded depth map if different. Overrides the depth K derived from `intrinsics`. |
+| `depth_extrinsics` | JSON, optional | 16 finite floats, column-major depth-camera → photo-camera transform in metres, OpenCV axes (x right, y down, z forward). Default identity. |
+| `camera_transform` | JSON, optional | 16 floats, column-major camera-to-world (ARKit, world +Y up): gravity for the floor and upright, also supported for photo-only object requests without depth |
 | `image_orientation` | 1 \| 3 \| 6 \| 8 | EXIF value; upright fallback without `camera_transform` |
 | `object_points` | JSON, optional | `[[u, v], ...]` taps on the object in photo pixels; picks the object region |
 
@@ -54,7 +58,7 @@ seen vertices onto the depth surface and fade that into the hidden side, then th
 flatten / repair / base plate. Too few depth points on the object (< 200) falls back to the
 photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
 
-Photo meshes that were not depth-fused are leveled before scaling and adding the
+Object-mode photo meshes that were not depth-fused are leveled before scaling and adding the
 plate. Without a camera transform, area-weighted face normals are clustered
 within 10°, retaining groups covering at least 2.5% of the surface. Candidate
 up directions within 35° of +Z are scored by parallel and perpendicular plane
@@ -73,7 +77,8 @@ precedence, including the same sensor-image upright quarter turns as depth fusio
 `image_orientation` is validated but does not override supplied gravity.
 `X-Print-Report` includes `"level": {"source": "gravity" | "shape" | "none",
 "tilt_deg": 19.8}` for these photo meshes. The angle is the applied correction.
-Depth-fused meshes and uploaded meshes retain their existing behavior.
+Depth-fused meshes, uploaded meshes, and face busts retain their existing behavior.
+Face busts use their dedicated cut/cap path, without object-shape leveling.
 
 For photo-only requests with `camera_transform`, the iOS app uploads an already
 upright photo with `image_orientation=1`. The column-major matrix must be the
@@ -83,6 +88,44 @@ pixel-up, viewing direction is -Z, and world +Y is up. The server derives uprigh
 turns from that matrix; an upright camera pitched down (including 50°) gets zero
 quarter turns, so an EXIF-free upright photo is not rotated again. Depth requests
 retain the sensor-oriented photo plus `ARCamera.transform` contract above.
+
+For differently calibrated cameras or aspect ratios (e.g. 640 × 480 depth and
+1280 × 720 photo), supply `depth_intrinsics` as well as the photo `intrinsics`.
+The server back-projects each depth pixel, applies `depth_extrinsics`, and projects
+into the photo to sample its foreground mask and register object taps. Gravity
+is rotated into the depth camera frame. Without `depth_intrinsics`, the original
+mask resize / scaled photo intrinsics path is retained. These fields apply to
+both object and face modes.
+
+### Face busts (`mode=face`)
+
+Send a `photo`, optionally with front-camera TrueDepth from the same ARFrame.
+On iOS, encode `ARFrame.capturedImage` in sensor orientation, **not mirrored**;
+convert `ARFrame.capturedDepthData` to `DepthFloat32` and upload its depth map as
+row-major little-endian float32 metres (e.g. 640 × 480), without a confidence map.
+Send `ARCamera.intrinsics` with the **capturedImage** width and height, and
+`ARCamera.transform` as `camera_transform`. The optional `face_transform` is
+`ARFaceAnchor.transform`, also column-major (16 finite floats).
+
+Without depth, send `image_orientation` (1, 3, 6 or 8) to turn a sensor-orientation
+JPEG upright before reconstruction, even when it has no EXIF tag. This also works
+in object mode. If omitted, photo-only requests retain EXIF-based orientation;
+an explicit 1 leaves the image as stored. Optional `face_vertices` (float32 LE XYZ)
+and `face_vertex_count` capture metadata are accepted and ignored, whether sent as
+file parts or form fields.
+
+Face fusion uses gravity, not a floor plane, rejects points more than 25 cm behind
+the nearest foreground point, and cuts 12 cm below the face anchor's head centre.
+Without an anchor it cuts 24 cm below the foreground top, clamped to its lowest
+point. The cap makes the bust stand flat. The fusion report adds `cut`:
+`"face anchor"` or `"top - 24 cm"`.
+
+Face mode always scales the object to **100 mm tall** by default, including after
+depth fusion; `height_mm` overrides this, and the base plate adds 2.5 mm. A photo
+alone (or unusable depth) uses TripoSR and caps off the bottom 20% of its height;
+unusable depth is reported under `fusion.skipped` as above. `face_transform` is
+ignored in object mode; malformed face-mode transforms return 400. Mesh uploads
+are not accepted in face mode. `X-Print-Report` includes `"mode": "face"`.
 
 ### Response
 
@@ -138,6 +181,49 @@ On Modal, job state lives in the `3d-print-jobs` modal.Dict, so any container ca
 container dies (a redeploy) turns into an error within 90 s. Nothing arrives while Modal cold-starts
 the GPU container (up to about 4 minutes).
 
+## `POST /photo-check`
+
+Run it on a Photo Print shot right after capture, before `/print`. A vision-language
+model (Qwen2.5-VL-3B, `server/photo_check.py`) looks for clutter and a cut-off object, and
+the phone's measured tilt catches a steep angle, so the app can ask for a retake and still
+offer to print anyway. Same bearer token as `/print`.
+
+`multipart/form-data`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `photo` | file | The shot: `.jpg`, `.png` or `.webp`. EXIF rotation is honoured. |
+| `camera_transform` | JSON, 16 floats | ARKit `camera.transform` at capture (column-major camera-to-world, +Y up), as sent to `/print`. Its pitch decides `steep_angle`; without it the angle is not checked (the model can't judge it: Qwen2.5-VL 3B and 7B both called a 54° top-down shot "eye level"). |
+
+`200`, JSON:
+
+```json
+{
+  "ok": false,
+  "issues": [
+    {"code": "steep_angle", "message": "The camera is pointing down at the object. Hold the phone level with its middle and shoot it from the side."},
+    {"code": "cluttered_background", "message": "There are other things around the object. Move it to a clear spot or clear the background."}
+  ],
+  "angle_checked": true,
+  "camera_pitch_deg": 54.0,
+  "max_pitch_deg": 30.0,
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "answers": {"cluttered_background": "Yes.", "cut_off": "Yes."}
+}
+```
+
+- `ok`: `true` when `issues` is empty; print straight away.
+- `issues[].code`, in this order: `steep_angle` (camera tilted more than `max_pitch_deg`, default 30, below level), `cluttered_background` (other things around or behind the object), `cut_off` (part of the object outside the frame). Codes are stable; show `message` to the user.
+- `angle_checked` / `camera_pitch_deg`: whether `camera_transform` was sent, and its pitch (0 level, 90 straight down).
+- `answers`: the model's raw replies to its two yes/no questions (`cut_off` asks "is the whole object inside?"), for debugging.
+
+Errors are JSON `{"detail": "..."}`: 400 empty photo or malformed `camera_transform`, 401 token,
+413 over 25 MB, 415 extension, 422 unreadable image, 502 the model failed. A failed
+check should not block printing: the app can fall through to `/print`.
+
+Timing: about 1 s on a warm GPU; the model has its own container, so add ~30–60 s
+when it is cold.
+
 ## `GET /api/health`
 
 `{"status": "ok"}` (more fields locally), no auth.
@@ -147,6 +233,7 @@ the GPU container (up to about 4 minutes).
 ```bash
 curl -F mesh=@scan.usdz -H "Authorization: Bearer $TOKEN" $URL/print -o scan.stl
 curl -F photo=@mug.jpg -F height_mm=95 -H "Authorization: Bearer $TOKEN" $URL/print -o mug.stl
+curl -F photo=@mug.jpg -H "Authorization: Bearer $TOKEN" $URL/photo-check
 ```
 
 Timing: a mesh takes a few seconds; a photo about 10–20 s on a warm GPU, plus

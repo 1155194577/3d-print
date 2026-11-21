@@ -1,7 +1,9 @@
-"""Deploy POST /print (and GET /api/health) on Modal (serverless GPU).
+"""Deploy POST /print, POST /photo-check (and GET /api/health) on Modal (serverless GPU).
 
-Only the synchronous /print route is exposed, behind PRINT_API_TOKEN; the
-browser uploader and its in-memory /api/jobs queue stay local-only.
+Only the synchronous routes are exposed, behind PRINT_API_TOKEN; the browser
+uploader and its in-memory /api/jobs queue stay local-only. /photo-check's VLM
+needs a newer transformers than TripoSR, so it runs in its own GPU container
+(PhotoCheckVLM) that the web function calls.
 
     modal secret create 3d-print-api PRINT_API_TOKEN=<random token>
     modal deploy deploy/modal_app.py
@@ -48,7 +50,41 @@ image = (
                    ignore=SKIP + [".git", "examples", "figures"])
 )
 
+
+def download_vlm():
+    from huggingface_hub import snapshot_download
+
+    from server.vlm import VLM_MODEL
+
+    snapshot_download(VLM_MODEL)
+
+
+vlm_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install_from_requirements(str(ROOT / "server" / "requirements-vlm.txt"))
+    .env({"HF_HOME": f"{MODELS}/hf", "TOKENIZERS_PARALLELISM": "false", "PYTHONWARNINGS": "ignore",
+          "PYTHONPATH": APP_DIR})
+    .add_local_file(ROOT / "server" / "vlm.py", f"{APP_DIR}/server/vlm.py", copy=True)
+    .add_local_file(ROOT / "server" / "__init__.py", f"{APP_DIR}/server/__init__.py", copy=True)
+    .run_function(download_vlm)
+)
+
 app = modal.App("3d-print", image=image)
+
+
+@app.cls(image=vlm_image, gpu="L4", timeout=120, scaledown_window=300)
+@modal.concurrent(max_inputs=4)
+class PhotoCheckVLM:
+    @modal.enter()
+    def load(self):
+        from server.vlm import QwenVLM
+
+        self.vlm = QwenVLM()
+        self.vlm.load()
+
+    @modal.method()
+    def ask(self, jpeg: bytes, questions: dict) -> dict:
+        return self.vlm(jpeg, questions)
 
 
 @app.function(
@@ -63,6 +99,7 @@ def web():
     import sys
 
     sys.path.insert(0, APP_DIR)
+    from server import photo_check
     from server.print_api import create_print_app, reconstruct_photo
     from server import print_jobs
 
@@ -70,4 +107,5 @@ def web():
         modal.Dict.from_name("3d-print-jobs", create_if_missing=True))
 
     reconstruct_photo.load()
+    photo_check.vlm = PhotoCheckVLM().ask.remote
     return create_print_app()

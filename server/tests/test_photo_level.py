@@ -100,7 +100,8 @@ def test_invalid_transform(value):
 
 @pytest.mark.parametrize("pitch", [20, 50])
 @pytest.mark.parametrize("stream", [False, True])
-def test_photo_api_gravity(monkeypatch, pitch, stream):
+@pytest.mark.parametrize("orientation", [None, "1"])
+def test_photo_api_gravity(monkeypatch, pitch, stream, orientation):
     monkeypatch.delenv("PRINT_API_TOKEN", raising=False)
     calls = []
 
@@ -112,12 +113,14 @@ def test_photo_api_gravity(monkeypatch, pitch, stream):
 
     monkeypatch.setattr(print_api, "reconstruct_photo", reconstruct)
     rotation = trimesh.transformations.rotation_matrix(np.deg2rad(-pitch), [1, 0, 0])
+    data = {"camera_transform": json.dumps(rotation.T.ravel().tolist()),
+            "height_mm": "100", "base_plate": "false"}
+    if orientation is not None:
+        data["image_orientation"] = orientation
     with TestClient(print_api.create_print_app()) as client:
         response = client.post("/print", files={"photo": ("box.jpg", b"photo")},
                                headers={"Accept": "application/x-ndjson"} if stream else {},
-                               data={"camera_transform": json.dumps(rotation.T.ravel().tolist()),
-                                     "height_mm": "100", "base_plate": "false",
-                                     "image_orientation": "1"})
+                               data=data)
         assert response.status_code == 200, response.text
         if stream:
             done = json.loads(response.text.splitlines()[-1])
