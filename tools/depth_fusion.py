@@ -235,7 +235,10 @@ def _depth_mask(frame, mask):
         vu = np.argwhere(valid)
         taps = [vu[np.argmin(np.sum((uv[valid] - tap) ** 2, axis=1))][::-1]
                 for tap in frame.taps]
-    connected = ndimage.binary_closing(registered, iterations=3) | registered
+    valid_depth = np.isfinite(frame.depth) & (frame.depth > 0.05) & (frame.depth < 5.0)
+    if frame.confidence is not None:
+        valid_depth &= frame.confidence >= 1
+    connected = registered | (ndimage.binary_closing(registered, iterations=3) & ~valid_depth)
     return _object_mask(connected, taps) & registered
 
 

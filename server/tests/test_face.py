@@ -243,3 +243,16 @@ def test_calibrated_mask_without_valid_depth(tmp_path):
     frame = Frame.load(str(path), 8, 8, intrinsics=calibration,
                        depth_intrinsics=calibration, object_points="[[4, 4]]")
     assert not _depth_mask(frame, np.ones((8, 8), bool)).any()
+
+
+def test_calibrated_mask_keeps_nearby_objects_separate(tmp_path):
+    path = tmp_path / "depth.f32"
+    path.write_bytes(np.full((48, 64), 0.4, dtype="<f4").tobytes())
+    calibration = json.dumps(dict(fx=55, fy=55, cx=32, cy=24, width=64, height=48))
+    frame = Frame.load(str(path), 64, 48, intrinsics=calibration,
+                       depth_intrinsics=calibration, object_points="[[20, 24]]")
+    expected = np.zeros((48, 64), bool)
+    expected[8:40, 8:31] = True
+    mask = expected.copy()
+    mask[8:40, 33:56] = True
+    assert np.array_equal(_depth_mask(frame, mask), expected)
