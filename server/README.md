@@ -31,17 +31,41 @@ Sizing: a mesh keeps its real size (metres → mm). `height_mm` is the object it
 base plate adds 2.5 mm below it, so a 120 mm object comes back 122.5 mm tall. A photo
 without `height_mm` is scaled to 200 mm on its largest side.
 
+### Photo + LiDAR depth
+
+Add these to a `photo` request, all from the same ARFrame, and the server fits TripoSR's
+shape to the measured depth. True size and pose come from the depth (so `height_mm` is
+only a fallback), the seen side is the LiDAR surface, and TripoSR fills in the hidden side.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `photo` | file | `capturedImage` in sensor orientation (not rotated), so `intrinsics` apply as-is |
+| `depth` | file `.f32` | `sceneDepth.depthMap`: little-endian float32 metres, row-major, NaN = no data (or a 16-bit `.png` in mm, 0 = no data) |
+| `depth_width`, `depth_height` | int | depth map size, e.g. 256 × 192 (raw depth only) |
+| `depth_confidence` | file `.u8`, optional | `confidenceMap`, uint8 0/1/2, same size; 0 is dropped |
+| `intrinsics` | JSON | `{"fx","fy","cx","cy","width","height"}` in photo pixels; scaled to the depth size |
+| `camera_transform` | JSON, optional | 16 floats, column-major camera-to-world (ARKit, world +Y up): gravity for the floor and upright |
+| `image_orientation` | 1 \| 3 \| 6 \| 8 | EXIF value; upright fallback without `camera_transform` |
+| `object_points` | JSON, optional | `[[u, v], ...]` taps on the object in photo pixels; picks the object region |
+
+Steps: mask the object (rembg, taps), back-project its depth pixels, find the floor (gravity
+plus a RANSAC plane), align the mesh by trimmed similarity ICP from 8 yaw starts, pull the
+seen vertices onto the depth surface and fade that into the hidden side, then the usual
+flatten / repair / base plate. Too few depth points on the object (< 200) falls back to the
+photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
+
 ### Response
 
 - `200`, `Content-Type: model/stl`, binary STL, `Content-Disposition: attachment; filename="<upload name>.stl"`.
 - `X-Print-Report` header, JSON:
-  `{"extents_mm": [x, y, z], "watertight": true, "faces": 23898, "volume_cm3": 249.0, "scale": "height → 122.5 mm"}`
+  `{"extents_mm": [x, y, z], "watertight": true, "faces": 23898, "volume_cm3": 249.0, "scale": "height → 122.5 mm"}`.
+  With depth it adds `"fusion": {"lidar_points": 2380, "icp_rmse_mm": 0.8, "scale": 0.37, "seen_vertices": 0.32, "floor": "camera gravity + plane"}`
 
 Errors are JSON `{"detail": "..."}`:
 
 | Code | When |
 |---|---|
-| 400 | neither or both files, empty file, bad `fit_bed` |
+| 400 | neither or both files, empty file, bad `fit_bed`, `depth` without `photo`, malformed depth/intrinsics/transform |
 | 401 | missing or wrong bearer token |
 | 415 | unsupported file extension (e.g. `.heic`, `.fbx`) |
 | 413 | upload over 200 MB (`PRINT_MAX_UPLOAD_MB`) |

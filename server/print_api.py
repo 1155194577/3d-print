@@ -19,10 +19,13 @@ from fastapi.responses import JSONResponse, Response
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRIPOSR_DIR = os.path.join(ROOT, "research", "triposr")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
+import depth_fusion  # noqa: E402
 import img2mesh  # noqa: E402
 
 MAX_UPLOAD_BYTES = int(os.environ.get("PRINT_MAX_UPLOAD_MB", "200")) * 1024 * 1024
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+DEPTH_EXTS = (".f32", ".bin", ".raw", ".png")
+CONFIDENCE_EXTS = (".u8", ".bin", ".raw")
 MESH_EXTS = (".obj", ".ply", ".usdz", ".usd", ".usdc", ".usda", ".glb", ".stl")
 TRIPOSR_MODEL = os.environ.get("TRIPOSR_MODEL", "stabilityai/TripoSR")
 
@@ -55,7 +58,19 @@ class PhotoReconstructor:
         self.rembg_session = rembg.new_session()
         self.model = model
 
-    def __call__(self, image_path, out_path, mc_resolution=256, foreground_ratio=0.85):
+    def foreground_mask(self, image_path):
+        """Object mask of the photo as stored (no EXIF rotation), uint8 0-255."""
+        import numpy as np
+        import rembg
+        from PIL import Image
+
+        with self.lock:
+            self.load()
+            img = Image.open(image_path).convert("RGB")
+            return np.asarray(rembg.remove(img, session=self.rembg_session, only_mask=True))
+
+    def __call__(self, image_path, out_path, mc_resolution=256, foreground_ratio=0.85,
+                 quarter_turns=None):
         import numpy as np
         import torch
         from PIL import Image, ImageOps
@@ -64,8 +79,10 @@ class PhotoReconstructor:
             self.load()
             from tsr.utils import remove_background, resize_foreground
 
-            # iPhone JPEGs are stored sideways with an EXIF rotation tag.
-            image = ImageOps.exif_transpose(Image.open(image_path))
+            if quarter_turns is None:  # iPhone JPEGs are stored sideways with an EXIF tag
+                image = ImageOps.exif_transpose(Image.open(image_path))
+            else:  # sensor-orientation frame: turn it upright from gravity
+                image = Image.open(image_path).convert("RGB").rotate(90 * quarter_turns, expand=True)
             image = remove_background(image, self.rembg_session)
             image = resize_foreground(image, foreground_ratio)
             arr = np.array(image).astype(np.float32) / 255.0
@@ -153,12 +170,23 @@ def print_stl(
     up_axis: str = Form("y", pattern="^(y|z)$"),
     fit_bed: str | None = Form(None),
     base_plate: bool = Form(True),
+    depth: UploadFile | None = File(None, description="ARKit sceneDepth: float32 LE metres (or 16-bit PNG, mm)"),
+    depth_width: int | None = Form(None, gt=0),
+    depth_height: int | None = Form(None, gt=0),
+    depth_confidence: UploadFile | None = File(None, description="ARKit confidenceMap: uint8 0/1/2"),
+    intrinsics: str | None = Form(None, description='{"fx","fy","cx","cy","width","height"} in photo px'),
+    camera_transform: str | None = Form(None, description="16 floats, column-major camera-to-world"),
+    image_orientation: int = Form(1),
+    object_points: str | None = Form(None, description="[[u, v], ...] taps on the object, photo px"),
     authorization: str | None = Header(None),
 ):
     _check_auth(authorization)
     if (mesh is None) == (photo is None):
         raise HTTPException(400, "send exactly one of `mesh` or `photo`")
     bed = _parse_bed(fit_bed)
+    if depth is not None and photo is None:
+        raise HTTPException(400, "`depth` goes with `photo`")
+    fusion = None
 
     base_thickness = 3.0
     plate_height = max(base_thickness - 0.5, 0.0) if base_plate else 0.0
@@ -175,11 +203,39 @@ def print_stl(
             img = _save_upload(photo, PHOTO_EXTS, workdir, "photo")
             stem = photo.filename
             src = os.path.join(workdir, "raw.obj")
+            frame = None
+            if depth is not None:
+                dpath = _save_upload(depth, DEPTH_EXTS, workdir, "depth")
+                cpath = (_save_upload(depth_confidence, CONFIDENCE_EXTS, workdir, "confidence")
+                         if depth_confidence is not None else None)
+                try:
+                    frame = depth_fusion.Frame.load(
+                        dpath, depth_width, depth_height, cpath, intrinsics,
+                        camera_transform, image_orientation, object_points)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc))
             try:
-                reconstruct_photo(img, src)
+                mask = None
+                if frame is None:
+                    reconstruct_photo(img, src)
+                else:
+                    turns = depth_fusion.upright_turns(frame.up_camera())
+                    reconstruct_photo(img, src, quarter_turns=turns)
+                    mask = reconstruct_photo.foreground_mask(img)
             except Exception as exc:
                 raise HTTPException(422, f"could not reconstruct the photo: {exc}")
             kwargs = {}
+            if frame is not None:
+                import trimesh
+
+                try:
+                    fused, fusion = depth_fusion.fuse(trimesh.load(src, force="mesh"), frame, mask)
+                    src = os.path.join(workdir, "fused.ply")
+                    fused.export(src)
+                    kwargs = dict(units_to_mm=1000.0, up_axis="z")
+                    height = None
+                except depth_fusion.FusionError as exc:
+                    fusion = {"skipped": str(exc)}
         try:
             out, report = img2mesh.prepare_mesh(
                 src, height=height, fit_bed=bed, base_plate=base_plate,
@@ -198,6 +254,7 @@ def print_stl(
     summary = {
         "extents_mm": [round(float(v), 1) for v in ex],
         "watertight": bool(report["watertight"]),
+        **({"fusion": fusion} if fusion else {}),
         "faces": int(report["faces"]),
         "volume_cm3": round(report["volume_cm3"], 1) if report["volume_cm3"] else None,
         "scale": report["scale_note"],
