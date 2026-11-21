@@ -34,6 +34,7 @@ jobs:
       - run: python -m pytest server/tests -q
 
   image:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space (CUDA build image + torch wheels)
