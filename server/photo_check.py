@@ -25,7 +25,7 @@ from server import vlm as vlm_module
 MAX_PITCH_DEG = float(os.environ.get("PHOTO_CHECK_MAX_PITCH_DEG", "30"))
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
-# Each question is asked on its own, answered yes/no; ISSUE_IF is the answer that flags it.
+# ISSUE_IF is the yes/no answer that flags each issue.
 QUESTIONS = {
     "cluttered_background": "Apart from the main object and the floor, wall or table it stands on, are other "
                             "objects (furniture, chairs, clothes, boxes, other items) visible in the photo? "
@@ -44,9 +44,7 @@ MESSAGES = {
     "cut_off": "Part of the object is outside the photo. Step back so all of it is in the frame.",
 }
 
-# {question name: question} -> {question name: answer}. The Modal deploy swaps this
-# for a call into the GPU container that holds the model.
-vlm = vlm_module.QwenVLM()
+vlm = vlm_module.SiliconFlowVLM()
 router = APIRouter()
 
 

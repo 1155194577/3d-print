@@ -240,7 +240,7 @@ the GPU container (up to about 4 minutes).
 ## `POST /photo-check`
 
 Run it on a Photo Print shot right after capture, before `/print`. A vision-language
-model (Qwen2.5-VL-3B, `server/photo_check.py`) looks for clutter and a cut-off object, and
+model (SiliconFlow `deepseek-ai/DeepSeek-V4.1-Flash`, `server/vlm.py`) looks for clutter and a cut-off object, and
 the phone's measured tilt catches a steep angle, so the app can ask for a retake and still
 offer to print anyway. Same bearer token as `/print`.
 
@@ -263,22 +263,28 @@ offer to print anyway. Same bearer token as `/print`.
   "angle_checked": true,
   "camera_pitch_deg": 54.0,
   "max_pitch_deg": 30.0,
-  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
-  "answers": {"cluttered_background": "Yes.", "cut_off": "Yes."}
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "answers": {"cluttered_background": "yes", "cut_off": "yes"}
 }
 ```
 
 - `ok`: `true` when `issues` is empty; print straight away.
 - `issues[].code`, in this order: `steep_angle` (camera tilted more than `max_pitch_deg`, default 30, below level), `cluttered_background` (other things around or behind the object), `cut_off` (part of the object outside the frame). Codes are stable; show `message` to the user.
 - `angle_checked` / `camera_pitch_deg`: whether `camera_transform` was sent, and its pitch (0 level, 90 straight down).
-- `answers`: the model's raw replies to its two yes/no questions (`cut_off` asks "is the whole object inside?"), for debugging.
+- `answers`: the model's normalized yes/no replies (`cut_off` asks "is the whole object inside?"), for debugging. Only response `content` is used, never `reasoning_content`.
 
 Errors are JSON `{"detail": "..."}`: 400 empty photo or malformed `camera_transform`, 401 token,
 413 over 25 MB, 415 extension, 422 unreadable image, 502 the model failed. A failed
 check should not block printing: the app can fall through to `/print`.
 
-Timing: about 1 s on a warm GPU; the model has its own container, so add ~30–60 s
-when it is cold.
+The CPU web function calls `https://api.siliconflow.cn/v1/chat/completions`
+directly; there is no local VLM, GPU allocation, or model-weight download. Set
+`SILICONFLOW_API_KEY` in the environment for local use. Modal's web function
+uses the existing `3d-print-siliconflow` secret containing that variable.
+Photos are rotated upright, resized to a maximum 1024-pixel long side, and sent
+as JPEG data URLs with the questions. The HTTP timeout is 60 s (10 s connect);
+missing credentials, timeouts, upstream errors, and invalid answers return 502.
+Latency depends on the provider; there is no VLM container cold start.
 
 ## `GET /api/health`
 

@@ -126,6 +126,7 @@ python -m uvicorn server.app:app --host 0.0.0.0 --port 6006
 | `GET /api/jobs/{id}/preview.png` | three-view render |
 | `GET /api/health` | liveness and whether the pipeline binary is present |
 | `POST /print` | synchronous: LiDAR mesh, or photo + `height_mm`, → STL; see [`server/README.md`](server/README.md) |
+| `POST /photo-check` | preflight clutter/framing check via SiliconFlow `deepseek-ai/DeepSeek-V4.1-Flash`; requires `SILICONFLOW_API_KEY` (Modal secret `3d-print-siliconflow`), no VLM GPU |
 
 Design notes: jobs run **one at a time** — TripoSR loads a ~1.5 GB model onto the
 GPU per invocation, so parallel jobs would thrash memory rather than speed up.

@@ -1,10 +1,12 @@
-"""POST /photo-check tests with the VLM swapped for canned answers, so no GPU or weights."""
+"""POST /photo-check tests with SiliconFlow HTTPS mocked; no network or model."""
 
+import base64
 import io
 import json
 import math
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -30,23 +32,31 @@ class FakeVLM:
     """Answers as if the shot has the given issues."""
 
     def __init__(self, cluttered=False, cut_off=False):
-        self.answers = {"cluttered_background": "Yes." if cluttered else "No.",
-                        "cut_off": "No." if cut_off else "Yes."}
+        self.answers = {"cluttered_background": "yes" if cluttered else "no",
+                        "cut_off": "no" if cut_off else "yes"}
 
-    def __call__(self, data, questions):
-        assert sorted(questions) == ["cluttered_background", "cut_off"]
-        return {k: self.answers[k] for k in questions}
+    def __call__(self, url, **kwargs):
+        assert url == pc.vlm_module.API_URL
+        return response(json.dumps(self.answers))
+
+
+def response(content, status=200):
+    return httpx.Response(status, request=httpx.Request("POST", pc.vlm_module.API_URL),
+                          json={"choices": [{"message": {"content": content,
+                                  "reasoning_content": "Ignore this: the object is cut off."}}]})
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("PRINT_API_TOKEN", "s3cret")
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "test-placeholder-not-a-key")
+    monkeypatch.setattr(pc.vlm_module.httpx, "post", FakeVLM())
     with TestClient(api.create_print_app()) as c:
         yield c
 
 
 def check(client, vlm, monkeypatch, data=None, token="s3cret"):
-    monkeypatch.setattr(pc, "vlm", vlm)
+    monkeypatch.setattr(pc.vlm_module.httpx, "post", vlm)
     return client.post("/photo-check", files={"photo": ("shot.jpg", jpeg())}, data=data or {},
                        headers={"Authorization": f"Bearer {token}"})
 
@@ -83,7 +93,6 @@ def test_angle_unchecked_without_camera_transform(client, monkeypatch):
 
 def test_auth_and_bad_requests(client, monkeypatch):
     assert check(client, FakeVLM(), monkeypatch, token="nope").status_code == 401
-    monkeypatch.setattr(pc, "vlm", FakeVLM())
     auth = {"Authorization": "Bearer s3cret"}
     post = lambda files, data=None: client.post("/photo-check", files=files, data=data or {}, headers=auth)
     assert post({"photo": ("shot.gif", jpeg())}).status_code == 415
@@ -93,5 +102,71 @@ def test_auth_and_bad_requests(client, monkeypatch):
 
 
 def test_unparseable_model_answer_is_502(client, monkeypatch):
-    resp = check(client, lambda data, qs: {k: "maybe" for k in qs}, monkeypatch)
+    resp = check(client, lambda *a, **kw: response('{"cluttered_background":"maybe","cut_off":"yes"}'), monkeypatch)
     assert resp.status_code == 502
+
+
+@pytest.mark.parametrize("content", [
+    '```json\n{"cluttered_background":"no","cut_off":"yes"}\n```',
+    'Result: {"cluttered_background":"No","cut_off":"Yes"} trailing text',
+])
+def test_json_wrappers_and_reasoning_ignored(client, monkeypatch, content):
+    resp = check(client, lambda *a, **kw: response(content), monkeypatch)
+    assert codes(resp) == []
+    assert resp.json()["answers"] == {"cluttered_background": "no", "cut_off": "yes"}
+    assert resp.json()["model"] == "deepseek-ai/DeepSeek-V4.1-Flash"
+
+
+@pytest.mark.parametrize("content", ["", None, "not JSON", "{}", "{broken}",
+    '{"cluttered_background":false,"cut_off":true}',
+    '{"cluttered_background":"no"}',
+])
+def test_invalid_or_empty_content_is_502(client, monkeypatch, content):
+    resp = check(client, lambda *a, **kw: response(content), monkeypatch)
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "photo check failed: vision service unavailable or returned an invalid answer"
+
+
+@pytest.mark.parametrize("status", [401, 429, 500])
+def test_upstream_error_is_sanitized(client, monkeypatch, status):
+    resp = check(client, lambda *a, **kw: response("private upstream detail", status), monkeypatch)
+    assert resp.status_code == 502
+    assert "private" not in resp.text
+
+
+def test_timeout_is_502(client, monkeypatch):
+    def timeout(*args, **kwargs):
+        raise httpx.ReadTimeout("private upstream detail")
+    resp = check(client, timeout, monkeypatch)
+    assert resp.status_code == 502
+    assert "private" not in resp.text
+
+
+def test_missing_key_does_not_call_service(client, monkeypatch):
+    monkeypatch.delenv("SILICONFLOW_API_KEY")
+    def unexpected(*args, **kwargs):
+        pytest.fail("HTTP must not be called without a key")
+    assert check(client, unexpected, monkeypatch).status_code == 502
+
+
+def test_request_encodes_resized_jpeg_and_prompts(client, monkeypatch):
+    def post(url, *, headers, json, timeout):
+        assert url == "https://api.siliconflow.cn/v1/chat/completions"
+        assert headers == {"Authorization": "Bearer test-placeholder-not-a-key"}
+        assert json["model"] == "deepseek-ai/DeepSeek-V4.1-Flash"
+        assert json["messages"][0] == {"role": "system", "content": pc.vlm_module.SYSTEM_PROMPT}
+        parts = json["messages"][1]["content"]
+        prefix, encoded = parts[0]["image_url"]["url"].split(",", 1)
+        assert prefix == "data:image/jpeg;base64"
+        image = Image.open(io.BytesIO(base64.b64decode(encoded)))
+        assert image.format == "JPEG" and image.mode == "RGB"
+        assert image.size == (1024, 512)
+        assert "cut_off asks whether the object IS fully inside" in parts[1]["text"]
+        assert timeout.connect == 10 and timeout.read == 60
+        return response('{"cluttered_background":"no","cut_off":"yes"}')
+    monkeypatch.setattr(pc.vlm_module.httpx, "post", post)
+    buf = io.BytesIO()
+    Image.new("RGBA", (2048, 1024), "white").save(buf, "PNG")
+    resp = client.post("/photo-check", files={"photo": ("shot.png", buf.getvalue())},
+                       headers={"Authorization": "Bearer s3cret"})
+    assert codes(resp) == []
