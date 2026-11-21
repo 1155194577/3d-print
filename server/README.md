@@ -207,3 +207,35 @@ curl -F photo=@mug.jpg -H "Authorization: Bearer $TOKEN" $URL/photo-check
 
 Timing: a mesh takes a few seconds; a photo about 10–20 s on a warm GPU, plus
 ~30–60 s when the container is cold (it scales to zero after 5 idle minutes).
+
+## Modal deployment and terminated requests
+
+Deploy with `modal deploy --strategy rolling deploy/modal_app.py`, then wait for
+`GET /api/health` before sending a print. Do not stop containers while they are
+starting or serving requests to force a new deployment: stopping a container also
+kills its in-flight requests, including requests still waiting for model loading.
+A client can then receive `500 modal-http: internal error: function was terminated
+by signal` without a Python traceback. Use Modal's container result/termination
+reason to distinguish an operator stop from an OOM or native crash; the HTTP
+message alone does not identify the cause.
+
+Inspect `modal app history 3d-print --json` and
+`modal container logs <container-id> --all --timestamps` when correlating a failure
+with deployments or stops. A result of `GENERIC_STATUS_TERMINATED` with
+`Container terminated due to user termination request` is an explicit stop, not
+evidence that face cutting crashed.
+
+To isolate native face processing in the **same image** as the deployment:
+
+```bash
+modal run -m deploy.diagnose_face --photo face.jpg --mesh raw-face.obj
+modal run -m deploy.diagnose_face --photo face.jpg --mesh raw-face.obj --operation cut
+modal run -m deploy.diagnose_face --photo face.jpg --mesh raw-face.obj --operation object
+```
+
+The first run reconstructs the photo on an L4 and saves the raw mesh locally;
+subsequent runs reuse it. A subprocess in the deployment image prints package
+versions, mesh counts, peak RSS, and cut/repair stage boundaries with faulthandler
+enabled. A native failure produces a nonzero exit code instead of silently
+finishing the diagnostic. `object` skips the bust cut as a control. Keep the
+photo and raw mesh out of git.
