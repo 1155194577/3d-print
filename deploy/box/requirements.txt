@@ -4,4 +4,5 @@
 -r ../../server/requirements-web.txt
 pymeshfix
 manifold3d
+networkx               # trimesh hole filling in printability checks
 modal>=1.6
