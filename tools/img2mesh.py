@@ -96,6 +96,8 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
         cur = m.extents[2]
         if cur <= 0:
             raise SystemExit("Degenerate mesh (zero height)")
+        if height <= 0:
+            raise SystemExit("Height must be positive")
         if base_plate and height <= base_thickness:
             raise SystemExit("Height must exceed the base plate's thickness")
         m.apply_scale((height - plate_height) / cur)
