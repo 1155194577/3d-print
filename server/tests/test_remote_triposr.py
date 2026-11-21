@@ -56,3 +56,15 @@ def test_reconstruct_streams_stages_and_caches_mask(tmp_path):
     assert service.foreground_mask.calls == []
     np.testing.assert_array_equal(remote.foreground_mask(str(photo)), mask)
     assert len(service.foreground_mask.calls) == 1
+
+
+def test_unread_masks_are_bounded(tmp_path):
+    from server import remote_triposr
+
+    remote = ModalReconstructor()
+    remote._remote = FakeService(np.zeros((2, 2), np.uint8))
+    for i in range(remote_triposr.MASK_CACHE + 5):
+        photo = tmp_path / f"p{i}.jpg"
+        photo.write_bytes(b"jpeg")
+        remote(str(photo), str(tmp_path / "raw.obj"))
+    assert len(remote._masks) == remote_triposr.MASK_CACHE

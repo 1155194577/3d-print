@@ -10,6 +10,7 @@ import threading
 
 APP_NAME = os.environ.get("TRIPOSR_MODAL_APP", "3d-print-triposr")
 CLASS_NAME = "TripoSR"
+MASK_CACHE = 8  # only depth prints read the mask back; photo-only prints leave theirs
 
 
 class ModalReconstructor:
@@ -46,6 +47,8 @@ class ModalReconstructor:
         if result.get("mask") is not None:
             with self._lock:
                 self._masks[os.path.abspath(image_path)] = result["mask"]
+                while len(self._masks) > MASK_CACHE:
+                    self._masks.pop(next(iter(self._masks)))
 
     def foreground_mask(self, image_path):
         """Object mask of the photo as stored (no EXIF rotation), uint8 0-255."""
