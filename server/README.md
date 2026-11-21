@@ -55,12 +55,16 @@ flatten / repair / base plate. Too few depth points on the object (< 200) falls 
 photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
 
 Photo meshes that were not depth-fused are leveled before scaling and adding the
-plate. Without a camera transform, the largest planar supporting convex-hull
-facet within 35° of down is aligned to down; objects without a suitable flat
-base are unchanged. With a transform (no depth required), camera gravity takes
+plate. Without a camera transform, area-weighted face normals are clustered
+within 10°, retaining groups covering at least 2.5% of the surface. Candidate
+up directions within 50° of +Z are scored by parallel and perpendicular plane
+area, then refined by weighted least squares. A correction must clearly beat
+the current +Z score (by both 10% of that score and 5% of total area); otherwise
+the mesh is unchanged. This supports box-like objects with missing or flattened
+bottoms. With a transform (no depth required), camera gravity takes
 precedence, including the same sensor-image upright quarter turns as depth fusion;
 `image_orientation` is validated but does not override supplied gravity.
-`X-Print-Report` includes `"level": {"source": "gravity" | "base plane" | "none",
+`X-Print-Report` includes `"level": {"source": "gravity" | "shape" | "none",
 "tilt_deg": 19.8}` for these photo meshes. The angle is the applied correction.
 Depth-fused meshes and uploaded meshes retain their existing behavior.
 

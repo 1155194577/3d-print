@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import trimesh
+from scipy.spatial import cKDTree
 
 import depth_fusion
 
@@ -25,19 +26,67 @@ def photo_up(camera_transform, image_orientation=1):
     return up, depth_fusion.upright_turns(up)
 
 
-def base_normal(mesh):
-    """Largest supporting planar hull facet within 35 degrees of down."""
-    if len(mesh.vertices) < 4 or len(mesh.faces) == 0:
+def shape_up(mesh):
+    """Fit a box-like up direction from dominant parallel/orthogonal planes."""
+    areas = mesh.area_faces
+    if not len(areas) or areas.sum() <= 0:
         return None
-    try:
-        hull = mesh.convex_hull
-    except (ValueError, RuntimeError):
+    normals = mesh.face_normals
+    cosine = np.cos(np.deg2rad(10))
+    sine = np.sin(np.deg2rad(10))
+    remaining = areas > 0
+    groups, weights = [], []
+    _, seeds = np.unique(np.round(normals / 0.08).astype(int), axis=0, return_index=True)
+    tree = cKDTree(np.vstack([normals, -normals]))
+    neighborhoods = [np.unique(np.asarray(indices) % len(normals)) for indices in
+                     tree.query_ball_point(normals[seeds], np.sqrt(2 - 2 * cosine))]
+    masses = np.array([areas[indices].sum() for indices in neighborhoods])
+    while len(masses) and masses.max() >= areas.sum() * 0.025:
+        best = masses.argmax()
+        members = neighborhoods[best]
+        members = members[remaining[members]]
+        weight = areas[members].sum()
+        if weight < areas.sum() * 0.025:
+            break
+        dots = normals[members] @ normals[seeds[best]]
+        normal = (normals[members] * (areas[members] * np.sign(dots))[:, None]).sum(axis=0)
+        normal /= np.linalg.norm(normal)
+        groups.append(normal)
+        weights.append(weight)
+        remaining[members] = False
+        masses = np.array([areas[indices[remaining[indices]]].sum() for indices in neighborhoods])
+    if not groups:
         return None
-    candidates = []
-    for faces, normal, area in zip(hull.facets, hull.facets_normal, hull.facets_area):
-        if normal[2] < -np.cos(np.deg2rad(35)) and area > hull.area * 0.01:
-            candidates.append((area, normal))
-    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+    groups, weights = np.array(groups), np.array(weights)
+
+    def score(up):
+        dots = np.abs(groups @ up)
+        return weights[(dots > cosine) | (dots < sine)].sum()
+
+    identity = np.array([0., 0., 1.])
+    candidates = groups * np.where(groups[:, 2] < 0, -1, 1)[:, None]
+    candidates = candidates[candidates[:, 2] > np.cos(np.deg2rad(50))]
+    if not len(candidates):
+        return None
+    up = max(candidates, key=lambda candidate: (score(candidate), candidate[2]))
+    baseline = score(identity)
+    if score(up) <= baseline + max(areas.sum() * 0.05, baseline * 0.1):
+        return None
+    dots = np.abs(groups @ up)
+    parallel, perpendicular = dots > cosine, dots < sine
+    matrix = np.zeros((3, 3))
+    for normal, weight, para, perp in zip(groups, weights, parallel, perpendicular):
+        outer = np.outer(normal, normal)
+        if para:
+            matrix += weight * (np.eye(3) - outer)
+        elif perp:
+            matrix += weight * outer
+    _, vectors = np.linalg.eigh(matrix)
+    refined = vectors[:, 0]
+    refined *= 1 if refined[2] >= 0 else -1
+    if refined[2] < np.cos(np.deg2rad(50)) or score(refined) <= baseline + max(areas.sum() * 0.05, baseline * 0.1):
+        return None
+    return refined
 
 
 def level_mesh(mesh, gravity=None):
@@ -53,9 +102,9 @@ def level_mesh(mesh, gravity=None):
         target = np.array([0., 0., 1.])
         source = "gravity"
     else:
-        normal = base_normal(mesh)
-        target = np.array([0., 0., -1.])
-        source = "base plane"
+        normal = shape_up(mesh)
+        target = np.array([0., 0., 1.])
+        source = "shape"
     if normal is None:
         return {"source": "none", "tilt_deg": 0.0}
     tilt = np.degrees(np.arccos(np.clip(np.dot(normal, target) / np.linalg.norm(normal), -1, 1)))
