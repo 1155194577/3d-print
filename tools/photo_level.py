@@ -9,6 +9,34 @@ from scipy.spatial import cKDTree
 import depth_fusion
 
 
+def pitch_search(mesh):
+    """Minimise yaw-optimised AABB volume for downward camera pitch, 0..75°."""
+    if len(mesh.vertices) < 4 or len(mesh.faces) == 0:
+        return None, np.array([])
+    try:
+        vertices = mesh.convex_hull.vertices
+    except (ValueError, RuntimeError):
+        return None, np.array([])
+    yaw = np.deg2rad(np.arange(90))
+    cosine, sine = np.cos(yaw)[:, None], np.sin(yaw)[:, None]
+    scores = []
+    for degrees in range(76):
+        angle = np.deg2rad(degrees)
+        # Camera horizontal is +Y: undo downward pitch with a negative Y turn.
+        x = np.cos(angle) * vertices[:, 0] - np.sin(angle) * vertices[:, 2]
+        y = vertices[:, 1]
+        z = np.sin(angle) * vertices[:, 0] + np.cos(angle) * vertices[:, 2]
+        widths = np.ptp(cosine * x - sine * y, axis=1)
+        depths = np.ptp(sine * x + cosine * y, axis=1)
+        scores.append(float(np.min(widths * depths) * np.ptp(z)))
+    scores = np.asarray(scores)
+    best = int(scores.argmin())
+    if scores[0] <= 0 or scores[best] >= 0.95 * scores[0]:
+        return None, scores
+    angle = np.deg2rad(best)
+    return np.array([np.sin(angle), 0., np.cos(angle)]), scores
+
+
 def photo_up(camera_transform, image_orientation=1):
     """Return sensor-frame gravity and the same upright turn used by fusion."""
     if image_orientation not in (1, 3, 6, 8):
@@ -65,7 +93,7 @@ def shape_up(mesh):
 
     identity = np.array([0., 0., 1.])
     candidates = groups * np.where(groups[:, 2] < 0, -1, 1)[:, None]
-    candidates = candidates[candidates[:, 2] > np.cos(np.deg2rad(50))]
+    candidates = candidates[candidates[:, 2] > np.cos(np.deg2rad(35))]
     if not len(candidates):
         return None
     up = max(candidates, key=lambda candidate: (score(candidate), candidate[2]))
@@ -84,7 +112,7 @@ def shape_up(mesh):
     _, vectors = np.linalg.eigh(matrix)
     refined = vectors[:, 0]
     refined *= 1 if refined[2] >= 0 else -1
-    if refined[2] < np.cos(np.deg2rad(50)) or score(refined) <= baseline + max(areas.sum() * 0.05, baseline * 0.1):
+    if refined[2] < np.cos(np.deg2rad(35)) or score(refined) <= baseline + max(areas.sum() * 0.05, baseline * 0.1):
         return None
     return refined
 
@@ -103,6 +131,8 @@ def level_mesh(mesh, gravity=None):
         source = "gravity"
     else:
         normal = shape_up(mesh)
+        if normal is None:
+            normal, _ = pitch_search(mesh)
         target = np.array([0., 0., 1.])
         source = "shape"
     if normal is None:

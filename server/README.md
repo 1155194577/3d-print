@@ -57,16 +57,32 @@ photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
 Photo meshes that were not depth-fused are leveled before scaling and adding the
 plate. Without a camera transform, area-weighted face normals are clustered
 within 10°, retaining groups covering at least 2.5% of the surface. Candidate
-up directions within 50° of +Z are scored by parallel and perpendicular plane
+up directions within 35° of +Z are scored by parallel and perpendicular plane
 area, then refined by weighted least squares. A correction must clearly beat
 the current +Z score (by both 10% of that score and 5% of total area); otherwise
 the mesh is unchanged. This supports box-like objects with missing or flattened
-bottoms. With a transform (no depth required), camera gravity takes
+bottoms. If that estimate is inconclusive, a pitch-only search rotates about
+TripoSR's camera-horizontal +Y axis in the downward-camera correction direction
+(negative Y rotation), from 0–75° in 1° steps. It minimises AABB volume after
+optimising yaw in 1° steps over 0–89°; yaw is used only for scoring, not applied.
+The pitch correction must reduce that volume by more than 5% versus pitch zero.
+Both geometric estimators report source `shape`; neither can repair warped
+geometry or guarantee that a semantic top is facing up.
+With a transform (no depth required), camera gravity takes
 precedence, including the same sensor-image upright quarter turns as depth fusion;
 `image_orientation` is validated but does not override supplied gravity.
 `X-Print-Report` includes `"level": {"source": "gravity" | "shape" | "none",
 "tilt_deg": 19.8}` for these photo meshes. The angle is the applied correction.
 Depth-fused meshes and uploaded meshes retain their existing behavior.
+
+For photo-only requests with `camera_transform`, the iOS app uploads an already
+upright photo with `image_orientation=1`. The column-major matrix must be the
+camera-to-world of that **upright photo camera** (inverse of ARKit's
+`viewMatrix(for: interfaceOrientation)`): camera +X is pixel-right, +Y is
+pixel-up, viewing direction is -Z, and world +Y is up. The server derives upright
+turns from that matrix; an upright camera pitched down (including 50°) gets zero
+quarter turns, so an EXIF-free upright photo is not rotated again. Depth requests
+retain the sensor-oriented photo plus `ARCamera.transform` contract above.
 
 ### Response
 

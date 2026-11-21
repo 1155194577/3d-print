@@ -77,30 +77,51 @@ def test_steep_camera_pitch():
     assert np.max(mesh.face_normals[:, 2]) > np.cos(np.deg2rad(1))
 
 
+def test_pitch_search_55():
+    mesh = trimesh.creation.box(extents=[2, 3, 5])
+    mesh.apply_transform(trimesh.transformations.rotation_matrix(np.deg2rad(55), [0, 1, 0]))
+    up, scores = photo_level.pitch_search(mesh)
+    assert up is not None
+    assert np.argmin(scores) == pytest.approx(55, abs=2)
+    gravity_mesh = mesh.copy()
+    camera = trimesh.transformations.rotation_matrix(np.deg2rad(-55), [1, 0, 0])
+    gravity = photo_level.photo_up(json.dumps(camera.T.ravel().tolist()))
+    assert photo_level.level_mesh(gravity_mesh, gravity) == {"source": "gravity", "tilt_deg": 55.0}
+    assert photo_level.level_mesh(mesh) == {"source": "shape", "tilt_deg": 55.0}
+    assert np.max(mesh.face_normals[:, 2]) > np.cos(np.deg2rad(3))
+    np.testing.assert_allclose(mesh.vertices, gravity_mesh.vertices, atol=1e-10)
+
+
 @pytest.mark.parametrize("value", ["[]", "null", "not json", json.dumps([0] * 16)])
 def test_invalid_transform(value):
     with pytest.raises(ValueError, match="camera_transform"):
         photo_level.photo_up(value)
 
 
-def test_photo_api_gravity(monkeypatch):
+@pytest.mark.parametrize("pitch", [20, 50])
+def test_photo_api_gravity(monkeypatch, pitch):
     monkeypatch.delenv("PRINT_API_TOKEN", raising=False)
     calls = []
 
     def reconstruct(image, out, **kwargs):
         calls.append(kwargs)
-        tilted_box().export(out)
+        mesh = trimesh.creation.box(extents=[2, 3, 5])
+        mesh.apply_transform(trimesh.transformations.rotation_matrix(np.deg2rad(pitch), [0, 1, 0]))
+        mesh.export(out)
 
     monkeypatch.setattr(print_api, "reconstruct_photo", reconstruct)
-    rotation = trimesh.transformations.rotation_matrix(np.deg2rad(-20), [1, 0, 0])
+    rotation = trimesh.transformations.rotation_matrix(np.deg2rad(-pitch), [1, 0, 0])
     with TestClient(print_api.create_print_app()) as client:
         response = client.post("/print", files={"photo": ("box.jpg", b"photo")},
                                data={"camera_transform": json.dumps(rotation.T.ravel().tolist()),
-                                     "height_mm": "100", "base_plate": "false"})
+                                     "height_mm": "100", "base_plate": "false",
+                                     "image_orientation": "1"})
         assert response.status_code == 200, response.text
         assert response.headers["x-print-report"]
         assert json.loads(response.headers["x-print-report"])["level"] == {
-            "source": "gravity", "tilt_deg": 20.0}
+            "source": "gravity", "tilt_deg": float(pitch)}
+        np.testing.assert_allclose(json.loads(response.headers["x-print-report"])["extents_mm"],
+                                   [40, 60, 100], atol=0.2)
         assert calls == [{"quarter_turns": 0}]
         response = client.post("/print", files={"photo": ("box.jpg", b"photo")},
                                data={"camera_transform": "[]"})
