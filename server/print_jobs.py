@@ -2,7 +2,7 @@
 
 A job's state lives in a key-value store that every container can read (a modal.Dict on Modal,
 memory locally), so the app can drop the POST, come back later and pick the job up from any
-container. Keys: `<id>` holds the state dict, `<id>:stl` the finished STL.
+container. Keys: `<id>` holds the state dict, `<id>:stl:<n>` the finished STL in chunks.
 """
 
 import threading
@@ -11,6 +11,7 @@ import time
 TTL_S = 24 * 3600
 TOUCH_S = 5.0  # a running job rewrites its state this often...
 STALE_S = 90.0  # ...so one silent for this long died with its container
+CHUNK = 32 * 1024 * 1024  # modal.Dict values are capped at 100 MiB, so big STLs go in pieces
 
 
 class MemoryStore:
@@ -30,11 +31,12 @@ class MemoryStore:
 
     def prune(self, now):
         with self._lock:
-            old = [k for k, v in self._d.items()
-                   if isinstance(v, dict) and now - v["created"] > TTL_S]
-            for k in old:
+            old = {k: v for k, v in self._d.items()
+                   if isinstance(v, dict) and now - v["created"] > TTL_S}
+            for k, v in old.items():
                 self._d.pop(k, None)
-                self._d.pop(f"{k}:stl", None)
+                for i in range(v.get("stl_chunks", 0)):
+                    self._d.pop(f"{k}:stl:{i}", None)
 
 
 class ModalDictStore:
@@ -78,7 +80,10 @@ def start(job_id, run, filename):
     state = dict(type="progress", stage="received", history=["received"], since=now, created=now, updated=now,
                  filename=filename)
     if not store.put(job_id, state, skip_if_exists=True):
-        return False
+        old = store.get(job_id)
+        if old is not None and now - old["created"] <= TTL_S:
+            return False
+        store.put(job_id, state)  # that id's job expired: start afresh
 
     lock = threading.Lock()
 
@@ -93,8 +98,10 @@ def start(job_id, run, filename):
         try:
             body, report = run(lambda stage: save(stage=stage, since=time.time(),
                                                   history=state["history"] + [stage]))
-            store.put(f"{job_id}:stl", body)
-            save(type="done", report=report)
+            chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
+            for i, chunk in enumerate(chunks):
+                store.put(f"{job_id}:stl:{i}", chunk)
+            save(type="done", report=report, stl_chunks=len(chunks))
         except HTTPException as exc:
             save(type="error", status=exc.status_code, detail=exc.detail)
         except Exception as exc:  # a bug, not the client's fault
@@ -113,4 +120,5 @@ def start(job_id, run, filename):
 
 
 def get_stl(job_id):
-    return store.get(f"{job_id}:stl")
+    n = store.get(job_id)["stl_chunks"]
+    return b"".join(store.get(f"{job_id}:stl:{i}") for i in range(n))

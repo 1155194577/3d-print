@@ -166,3 +166,16 @@ def test_a_job_whose_container_died_is_an_error(client):
                                    updated=old, filename="a.stl"))
     out = lines(client.get(f"/print/{jid}", headers=NDJSON))
     assert out[-1]["type"] == "error" and "restarted" in out[-1]["detail"]
+
+
+def test_big_stl_is_chunked_and_expired_ids_restart(client, monkeypatch):
+    monkeypatch.setattr(print_jobs, "CHUNK", 1000)
+    data = trimesh.creation.icosphere(subdivisions=3).export(file_type="obj")
+    jid = str(uuid.uuid4())
+    old = time.time() - print_jobs.TTL_S - 10
+    print_jobs.store.put(jid, dict(type="done", created=old, updated=old, filename="x.stl",
+                                   report={}, stl_chunks=0))
+    out = lines(client.post("/print", files={"mesh": ("scan.obj", data)}, data={"job_id": jid},
+                            headers=NDJSON))
+    assert out[-1]["type"] == "done" and print_jobs.store.get(jid)["stl_chunks"] > 1
+    assert client.get(f"/print/{jid}/result").content == base64.b64decode(out[-1]["stl_base64"])
