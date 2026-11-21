@@ -7,8 +7,10 @@ Issue codes (stable; messages are for the user):
     cluttered_background   other things around or behind the object
     cut_off                part of the object is outside the frame
 
-When the phone sends its ARKit `camera_transform`, the measured pitch decides the
-angle instead of the model.
+The angle comes from the phone's measured pitch (ARKit `camera_transform`), not the
+model: Qwen2.5-VL 3B and 7B both called Johnny's 54-degree top-down purifier shot "eye
+level", while they answer clutter and cut-off reliably. Without a transform the angle
+is not checked.
 """
 
 import json
@@ -23,15 +25,16 @@ from server import vlm as vlm_module
 MAX_PITCH_DEG = float(os.environ.get("PHOTO_CHECK_MAX_PITCH_DEG", "30"))
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
-# Each question is asked on its own and answered yes/no; "yes" means the issue is there.
+# Each question is asked on its own, answered yes/no; ISSUE_IF is the answer that flags it.
 QUESTIONS = {
-    "steep_angle": "Was this photo taken from above, with the camera looking down at the main object? "
-                   "Answer yes or no.",
     "cluttered_background": "Apart from the main object and the floor, wall or table it stands on, are other "
                             "objects (furniture, chairs, clothes, boxes, other items) visible in the photo? "
                             "Answer yes or no.",
-    "cut_off": "Is any part of the main object cut off by the edge of the photo? Answer yes or no.",
+    "cut_off": "Is the whole main object inside the photo, with none of it cut off by the edges? "
+               "Answer yes or no.",
 }
+ISSUE_IF = {"cluttered_background": True, "cut_off": False}
+CODES = ["steep_angle", *QUESTIONS]
 
 MESSAGES = {
     "steep_angle": "The camera is pointing down at the object. Hold the phone level with its middle "
@@ -72,16 +75,14 @@ def camera_pitch_deg(camera_transform: str) -> float:
 
 
 def check(jpeg: bytes, pitch_deg: float | None = None) -> dict:
-    questions = {k: q for k, q in QUESTIONS.items() if not (k == "steep_angle" and pitch_deg is not None)}
-    answers = vlm(jpeg, questions)
-    flagged = {k: is_yes(answers[k]) for k in questions}
-    if pitch_deg is not None:
-        flagged["steep_angle"] = pitch_deg > MAX_PITCH_DEG
-    codes = [k for k in QUESTIONS if flagged[k]]
+    answers = vlm(jpeg, QUESTIONS)
+    flagged = {k: is_yes(answers[k]) == ISSUE_IF[k] for k in QUESTIONS}
+    flagged["steep_angle"] = pitch_deg is not None and pitch_deg > MAX_PITCH_DEG
+    codes = [k for k in CODES if flagged[k]]
     return {
         "ok": not codes,
         "issues": [{"code": c, "message": MESSAGES[c]} for c in codes],
-        "angle_source": "model" if pitch_deg is None else "camera",
+        "angle_checked": pitch_deg is not None,
         "camera_pitch_deg": None if pitch_deg is None else round(pitch_deg, 1),
         "max_pitch_deg": MAX_PITCH_DEG,
         "model": vlm_module.VLM_MODEL,

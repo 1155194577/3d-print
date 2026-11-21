@@ -27,12 +27,15 @@ def pitched(deg):
 
 
 class FakeVLM:
-    def __init__(self, **yes):
-        self.yes, self.asked = yes, []
+    """Answers as if the shot has the given issues."""
+
+    def __init__(self, cluttered=False, cut_off=False):
+        self.answers = {"cluttered_background": "Yes." if cluttered else "No.",
+                        "cut_off": "No." if cut_off else "Yes."}
 
     def __call__(self, data, questions):
-        self.asked.append(sorted(questions))
-        return {k: "Yes." if self.yes.get(k) else "No." for k in questions}
+        assert sorted(questions) == ["cluttered_background", "cut_off"]
+        return {k: self.answers[k] for k in questions}
 
 
 @pytest.fixture
@@ -53,27 +56,29 @@ def codes(resp):
     return [i["code"] for i in resp.json()["issues"]]
 
 
-def test_clean_shot_passes(client, monkeypatch):
-    resp = check(client, FakeVLM(), monkeypatch)
+def test_level_clean_shot_passes(client, monkeypatch):
+    resp = check(client, FakeVLM(), monkeypatch, {"camera_transform": pitched(5)})
     assert codes(resp) == [] and resp.json()["ok"] is True
-    assert resp.json()["angle_source"] == "model"
+    assert resp.json()["angle_checked"] is True
 
 
-def test_model_flags_every_issue_with_a_message(client, monkeypatch):
-    vlm = FakeVLM(steep_angle=True, cluttered_background=True, cut_off=True)
-    resp = check(client, vlm, monkeypatch)
+def test_steep_cluttered_cut_off_shot_flags_everything(client, monkeypatch):
+    resp = check(client, FakeVLM(cluttered=True, cut_off=True), monkeypatch, {"camera_transform": pitched(54)})
     assert codes(resp) == ["steep_angle", "cluttered_background", "cut_off"]
     assert resp.json()["ok"] is False and all(i["message"] for i in resp.json()["issues"])
 
 
-@pytest.mark.parametrize("deg,steep", [(0, False), (15, False), (45, True), (54, True), (90, True)])
+@pytest.mark.parametrize("deg,steep", [(-10, False), (0, False), (15, False), (30, False), (45, True), (54, True), (90, True)])
 def test_measured_pitch_decides_the_angle(client, monkeypatch, deg, steep):
-    vlm = FakeVLM(steep_angle=not steep)
-    resp = check(client, vlm, monkeypatch, {"camera_transform": pitched(deg)})
+    resp = check(client, FakeVLM(), monkeypatch, {"camera_transform": pitched(deg)})
     assert ("steep_angle" in codes(resp)) is steep
-    assert resp.json()["angle_source"] == "camera"
     assert resp.json()["camera_pitch_deg"] == pytest.approx(deg, abs=0.1)
-    assert vlm.asked == [["cluttered_background", "cut_off"]]
+
+
+def test_angle_unchecked_without_camera_transform(client, monkeypatch):
+    resp = check(client, FakeVLM(), monkeypatch)
+    assert codes(resp) == [] and resp.json()["angle_checked"] is False
+    assert resp.json()["camera_pitch_deg"] is None
 
 
 def test_auth_and_bad_requests(client, monkeypatch):

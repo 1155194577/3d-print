@@ -8,7 +8,7 @@ import io
 import os
 import threading
 
-VLM_MODEL = os.environ.get("PHOTO_CHECK_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
+VLM_MODEL = os.environ.get("PHOTO_CHECK_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
 MAX_SIDE_PX = 768
 
 

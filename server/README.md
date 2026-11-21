@@ -74,15 +74,16 @@ Errors are JSON `{"detail": "..."}`:
 ## `POST /photo-check`
 
 Run it on a Photo Print shot right after capture, before `/print`. A vision-language
-model (Qwen2.5-VL, `server/photo_check.py`) says whether the shot will rebuild badly,
-so the app can ask for a retake and still offer to print anyway. Same bearer token as `/print`.
+model (Qwen2.5-VL-3B, `server/photo_check.py`) looks for clutter and a cut-off object, and
+the phone's measured tilt catches a steep angle, so the app can ask for a retake and still
+offer to print anyway. Same bearer token as `/print`.
 
 `multipart/form-data`:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `photo` | file | The shot: `.jpg`, `.png` or `.webp`. EXIF rotation is honoured. |
-| `camera_transform` | JSON, 16 floats | Optional ARKit `camera.transform` (column-major camera-to-world, +Y up), as sent to `/print`. When present, its measured pitch decides `steep_angle` instead of the model. |
+| `camera_transform` | JSON, 16 floats | ARKit `camera.transform` at capture (column-major camera-to-world, +Y up), as sent to `/print`. Its pitch decides `steep_angle`; without it the angle is not checked (the model can't judge it: Qwen2.5-VL 3B and 7B both called a 54° top-down shot "eye level"). |
 
 `200`, JSON:
 
@@ -93,24 +94,24 @@ so the app can ask for a retake and still offer to print anyway. Same bearer tok
     {"code": "steep_angle", "message": "The camera is pointing down at the object. Hold the phone level with its middle and shoot it from the side."},
     {"code": "cluttered_background", "message": "There are other things around the object. Move it to a clear spot or clear the background."}
   ],
-  "angle_source": "camera",
-  "camera_pitch_deg": 54.2,
+  "angle_checked": true,
+  "camera_pitch_deg": 54.0,
   "max_pitch_deg": 30.0,
-  "model": "Qwen/Qwen2.5-VL-7B-Instruct",
-  "answers": {"cluttered_background": "Yes.", "cut_off": "No."}
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "answers": {"cluttered_background": "Yes.", "cut_off": "Yes."}
 }
 ```
 
 - `ok`: `true` when `issues` is empty; print straight away.
-- `issues[].code`: `steep_angle` (camera tilted more than `max_pitch_deg` below level), `cluttered_background` (other things around or behind the object), `cut_off` (part of the object outside the frame). Codes are stable; show `message` to the user.
-- `angle_source`: `camera` when `camera_transform` was sent (then `camera_pitch_deg` is set: 0 is level, 90 straight down), else `model`.
-- `answers`: the model's raw replies, for debugging.
+- `issues[].code`, in this order: `steep_angle` (camera tilted more than `max_pitch_deg`, default 30, below level), `cluttered_background` (other things around or behind the object), `cut_off` (part of the object outside the frame). Codes are stable; show `message` to the user.
+- `angle_checked` / `camera_pitch_deg`: whether `camera_transform` was sent, and its pitch (0 level, 90 straight down).
+- `answers`: the model's raw replies to its two yes/no questions (`cut_off` asks "is the whole object inside?"), for debugging.
 
 Errors are JSON `{"detail": "..."}`: 400 empty photo or malformed `camera_transform`, 401 token,
 413 over 25 MB, 415 extension, 422 unreadable image, 502 the model failed. A failed
 check should not block printing: the app can fall through to `/print`.
 
-Timing: about 1–2 s on a warm GPU; the model has its own container, so add ~30–60 s
+Timing: about 1 s on a warm GPU; the model has its own container, so add ~30–60 s
 when it is cold.
 
 ## `GET /api/health`
