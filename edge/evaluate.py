@@ -52,7 +52,8 @@ def main():
     images = {os.path.basename(p): te.preprocess(p, session) for p in args.images}
 
     models = {}
-    for scheme in args.schemes:
+    # fp32 runs first: it is the reference every other scheme is compared with.
+    for scheme in ["fp32"] + [s for s in args.schemes if s != "fp32"]:
         weights, _, act = scheme.partition("+")
         m = base if weights == "fp32" else copy.deepcopy(base)
         if weights != "fp32":
