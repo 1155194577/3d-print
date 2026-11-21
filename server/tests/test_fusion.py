@@ -54,7 +54,7 @@ class FakeTripoSR:
         self.mask = mask
         self.turns = "unset"
 
-    def __call__(self, image_path, out_path, quarter_turns=None):
+    def __call__(self, image_path, out_path, quarter_turns=None, progress=None):
         self.turns = quarter_turns
         ext = BOX[1] - BOX[0]
         box = trimesh.creation.box(extents=[ext[0], ext[2], ext[1]]).subdivide().subdivide()

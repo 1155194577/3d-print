@@ -99,11 +99,12 @@ def test_invalid_transform(value):
 
 
 @pytest.mark.parametrize("pitch", [20, 50])
-def test_photo_api_gravity(monkeypatch, pitch):
+@pytest.mark.parametrize("stream", [False, True])
+def test_photo_api_gravity(monkeypatch, pitch, stream):
     monkeypatch.delenv("PRINT_API_TOKEN", raising=False)
     calls = []
 
-    def reconstruct(image, out, **kwargs):
+    def reconstruct(image, out, progress=None, **kwargs):
         calls.append(kwargs)
         mesh = trimesh.creation.box(extents=[2, 3, 5])
         mesh.apply_transform(trimesh.transformations.rotation_matrix(np.deg2rad(pitch), [0, 1, 0]))
@@ -113,14 +114,20 @@ def test_photo_api_gravity(monkeypatch, pitch):
     rotation = trimesh.transformations.rotation_matrix(np.deg2rad(-pitch), [1, 0, 0])
     with TestClient(print_api.create_print_app()) as client:
         response = client.post("/print", files={"photo": ("box.jpg", b"photo")},
+                               headers={"Accept": "application/x-ndjson"} if stream else {},
                                data={"camera_transform": json.dumps(rotation.T.ravel().tolist()),
                                      "height_mm": "100", "base_plate": "false",
                                      "image_orientation": "1"})
         assert response.status_code == 200, response.text
-        assert response.headers["x-print-report"]
-        assert json.loads(response.headers["x-print-report"])["level"] == {
+        if stream:
+            done = json.loads(response.text.splitlines()[-1])
+            assert done["type"] == "done", done
+            report = done["report"]
+        else:
+            report = json.loads(response.headers["x-print-report"])
+        assert report["level"] == {
             "source": "gravity", "tilt_deg": float(pitch)}
-        np.testing.assert_allclose(json.loads(response.headers["x-print-report"])["extents_mm"],
+        np.testing.assert_allclose(report["extents_mm"],
                                    [40, 60, 100], atol=0.2)
         assert calls == [{"quarter_turns": 0}]
         response = client.post("/print", files={"photo": ("box.jpg", b"photo")},
