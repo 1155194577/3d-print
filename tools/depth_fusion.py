@@ -45,7 +45,12 @@ class Frame:
              object_points=None):
         if depth_path.lower().endswith(".png"):
             from PIL import Image
-            depth = np.asarray(Image.open(depth_path)).astype(np.float32) / 1000.0
+            try:
+                depth = np.asarray(Image.open(depth_path)).astype(np.float32) / 1000.0
+            except OSError as exc:
+                raise ValueError(f"depth PNG could not be read: {exc}")
+            if depth.ndim != 2:
+                raise ValueError("depth PNG must be single-channel (16-bit mm)")
             depth[depth <= 0] = np.nan
         else:
             if not width or not height:
