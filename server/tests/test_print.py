@@ -71,9 +71,10 @@ def test_mesh_keeps_real_size_and_stands_up(client, ext):
     assert rep["watertight"] and stl.is_watertight
 
 
-def test_usdz_uses_its_own_units(client, tmp_path):
+@pytest.mark.parametrize("units", ["m", "cm", "mm"])
+def test_usdz_uses_its_own_units(client, tmp_path, units):
     stl, _ = report(post(client, {"mesh": ("scan.usdz", usdz_bytes(tmp_path, 0.01))},
-                         {"base_plate": "false"}))
+                         {"base_plate": "false", "units": units}))
     assert sorted(np.round(stl.extents)) == [100, 200, 300]
     assert stl.extents[2] == pytest.approx(300, abs=0.5)
 
@@ -123,3 +124,22 @@ def test_bearer_token(client, monkeypatch):
     ok = post(client, {"mesh": ("scan.obj", data)},
               headers={"Authorization": "Bearer s3cret"})
     assert ok.status_code == 200
+
+
+def test_bad_token_rejected_before_upload_is_read(client, monkeypatch):
+    monkeypatch.setenv("PRINT_API_TOKEN", "s3cret")
+    monkeypatch.setattr(api, "_save_upload", lambda *a: pytest.fail("upload was read"))
+    data = scan_box().export(file_type="obj")
+    resp = post(client, {"mesh": ("scan.obj", data)}, headers={"Authorization": "Bearer nope"})
+    assert resp.status_code == 401 and "detail" in resp.json()
+
+
+def test_print_only_app(monkeypatch):
+    monkeypatch.setenv("PRINT_API_TOKEN", "s3cret")
+    with TestClient(api.create_print_app()) as c:
+        assert c.get("/api/health").json() == {"status": "ok"}
+        assert c.post("/api/jobs").status_code in (404, 405)
+        data = scan_box().export(file_type="obj")
+        assert post(c, {"mesh": ("scan.obj", data)}).status_code == 401
+        ok = post(c, {"mesh": ("scan.obj", data)}, headers={"Authorization": "Bearer s3cret"})
+        report(ok)

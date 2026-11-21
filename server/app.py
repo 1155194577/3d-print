@@ -43,7 +43,7 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
-from server.print_api import router as print_router
+from server.print_api import reject_unauthorized_print, router as print_router
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -349,6 +349,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="3d-print", description="Photo → printable STL", version="1.0.0")
     app.state.settings = settings
     app.state.manager = manager
+    app.middleware("http")(reject_unauthorized_print)
     app.include_router(print_router)
 
     @app.get("/", response_class=HTMLResponse)

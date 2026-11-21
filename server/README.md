@@ -3,7 +3,8 @@
 A LiDAR-scanned mesh, or a photo plus its measured height, in; a printable STL out.
 
 Served by the same FastAPI app as the `/api/jobs` web uploader (`server/app.py`); the
-route lives in `server/print_api.py`.
+route lives in `server/print_api.py`. The Modal deploy exposes only `/print` and
+`/api/health`.
 
 ```bash
 python -m uvicorn server.app:app --port 6006   # local (CPU works, photos are slow)
@@ -48,7 +49,7 @@ Errors are JSON `{"detail": "..."}`:
 
 ## `GET /api/health`
 
-`{"status": "ok", ...}`, no auth.
+`{"status": "ok"}` (more fields locally), no auth.
 
 ## Examples
 

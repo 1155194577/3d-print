@@ -1,4 +1,7 @@
-"""Deploy the /print API on Modal (serverless GPU).
+"""Deploy POST /print (and GET /api/health) on Modal (serverless GPU).
+
+Only the synchronous /print route is exposed, behind PRINT_API_TOKEN; the
+browser uploader and its in-memory /api/jobs queue stay local-only.
 
     modal secret create 3d-print-api PRINT_API_TOKEN=<random token>
     modal deploy deploy/modal_app.py
@@ -58,8 +61,7 @@ def web():
     import sys
 
     sys.path.insert(0, APP_DIR)
-    from server.app import app as api
-    from server.print_api import reconstruct_photo
+    from server.print_api import create_print_app, reconstruct_photo
 
     reconstruct_photo.load()
-    return api
+    return create_print_app()

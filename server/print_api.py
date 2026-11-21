@@ -13,8 +13,8 @@ import sys
 import tempfile
 import threading
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRIPOSR_DIR = os.path.join(ROOT, "research", "triposr")
@@ -88,6 +88,29 @@ def _check_auth(authorization):
     given = (authorization or "").removeprefix("Bearer ").strip()
     if not hmac.compare_digest(given.encode(), token.encode()):
         raise HTTPException(401, "missing or wrong bearer token")
+
+
+async def reject_unauthorized_print(request: Request, call_next):
+    """Check the token before the body is read, so anonymous uploads never spool."""
+    if request.url.path == "/print":
+        try:
+            _check_auth(request.headers.get("authorization"))
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
+
+
+def create_print_app():
+    """Just POST /print and a health check: what the serverless deploy exposes."""
+    app = FastAPI(title="3d-print /print")
+    app.middleware("http")(reject_unauthorized_print)
+    app.include_router(router)
+
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok"}
+
+    return app
 
 
 def _save_upload(upload, allowed, workdir, name):
