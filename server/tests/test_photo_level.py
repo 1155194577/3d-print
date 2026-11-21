@@ -47,16 +47,16 @@ def test_damaged_bottom(cut):
     if cut == "missing":
         mesh.update_faces(mesh.face_normals[:, 2] > -0.9)
     else:
-        mesh = mesh.slice_plane([0, 0, -1], [0, 0, 1])
-        # Close the horizontal cut without changing the tilted walls.
-        boundary = mesh.vertices[np.isclose(mesh.vertices[:, 2], -1)]
+        vertices, faces, _ = trimesh.intersections.slice_faces_plane(
+            mesh.vertices, mesh.faces, [0, 0, 1], [0, 0, -1])
+        boundary = vertices[np.isclose(vertices[:, 2], -1)]
         centre = boundary.mean(axis=0)
         angles = np.arctan2(boundary[:, 1] - centre[1], boundary[:, 0] - centre[0])
         boundary = boundary[np.argsort(angles)]
         cap = trimesh.Trimesh(vertices=np.vstack([centre, boundary]),
                               faces=[[0, (i + 1) % len(boundary) + 1, i + 1]
                                      for i in range(len(boundary))])
-        mesh = trimesh.util.concatenate([mesh, cap])
+        mesh = trimesh.util.concatenate([trimesh.Trimesh(vertices, faces), cap])
     report = photo_level.level_mesh(mesh)
     assert report == {"source": "shape", "tilt_deg": 20.0}
     wall = mesh.face_normals[np.abs(mesh.face_normals[:, 0]) > 0.9]
