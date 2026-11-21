@@ -92,12 +92,12 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
 
     # ---- 1. scale ------------------------------------------------
     plate_height = max(base_thickness - 0.5, 0.0) if base_plate else 0.0
-    if height:
+    if height is not None:
         cur = m.extents[2]
         if cur <= 0:
             raise SystemExit("Degenerate mesh (zero height)")
-        if height <= plate_height:
-            raise SystemExit("Height must exceed the base plate's added height")
+        if base_plate and height <= base_thickness:
+            raise SystemExit("Height must exceed the base plate's thickness")
         m.apply_scale((height - plate_height) / cur)
         scale_note = f"height → {height:g} mm"
     else:
@@ -144,12 +144,14 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
     except Exception:
         pass
 
-    if height:
+    if height is not None:
         m.apply_scale((height - plate_height) / m.extents[2])
     if fit_bed:
         bx, by, bz = fit_bed
         ex, ey, ez = m.extents
         if base_plate:
+            if bz <= base_thickness:
+                raise SystemExit("Bed height must exceed the base plate's thickness")
             factor = min((bx - 4.0) / ex, (by - 4.0) / ey,
                          bx / (ex + 0.06 * ez), by / (ey + 0.06 * ez),
                          (bz - plate_height) / ez)
