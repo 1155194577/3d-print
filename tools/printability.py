@@ -44,11 +44,12 @@ def check(m, bed=None, wall_samples=1500, seed=0):
 
     # ---- shells: every part must stand on the bed ----
     parts = m.split(only_watertight=False)
+    solid_parts = [p for p in parts if not _cavity(p, parts)]
     floating = _floating(parts, z0)
     if floating:
         warnings.append(f"{len(floating)} part(s) float above the bed: print with supports")
-    elif len(parts) > 1:
-        warnings.append(f"{len(parts)} separate parts")
+    elif len(solid_parts) > 1:
+        warnings.append(f"{len(solid_parts)} separate parts")
 
     # ---- size ----
     if bed is not None:
@@ -103,7 +104,7 @@ def check(m, bed=None, wall_samples=1500, seed=0):
         "open_edges": open_edges,
         "nonmanifold_edges": nonmanifold,
         "degenerate_faces": degenerate,
-        "parts": len(parts),
+        "parts": len(solid_parts),
         "base_contact_mm2": round(contact, 1),
         "overhang_pct": round(overhang * 100, 1),
         "thin_wall_pct": None if thin is None else round(thin * 100, 1),
@@ -133,15 +134,16 @@ def fix(m):
     return m
 
 
-def _floating(parts, z0):
-    """Parts that don't reach the bed. An inward-facing shell inside another part is a sealed
-    cavity, not a part."""
-    def cavity(p):
-        return p.is_watertight and p.volume < 0 and any(
-            q is not p and (q.bounds[0] <= p.bounds[0]).all() and (q.bounds[1] >= p.bounds[1]).all()
-            for q in parts)
+def _cavity(p, parts):
+    return p.is_watertight and p.volume < 0 and any(
+        q is not p and q.is_watertight and q.volume > 0
+        and (q.bounds[0] <= p.bounds[0]).all() and (q.bounds[1] >= p.bounds[1]).all()
+        for q in parts)
 
-    return [p for p in parts if p.bounds[0, 2] - z0 > BED_TOL_MM and not cavity(p)]
+
+def _floating(parts, z0):
+    """Parts above the bed, excluding enclosed inward-facing cavity shells."""
+    return [p for p in parts if p.bounds[0, 2] - z0 > BED_TOL_MM and not _cavity(p, parts)]
 
 
 def _wall_thickness(m, probes, seed, reach=3.0):

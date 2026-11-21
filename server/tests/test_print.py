@@ -90,6 +90,41 @@ def test_mesh_height_override_and_fit_bed(client):
     assert stl.extents[2] <= 200.01 and "shrunk" in rep["scale"]
 
 
+def test_optimise_is_opt_in_and_emits_stage(client, monkeypatch):
+    original = api._make_stl
+    stages = []
+    def tracked(job, progress):
+        def record(stage):
+            stages.append(stage)
+            progress(stage)
+        return original(job, record)
+    monkeypatch.setattr(api, "_make_stl", tracked)
+    files = {"mesh": ("scan.stl", trimesh.creation.box(extents=[40, 40, 60]).export(file_type="stl"))}
+    data = {"units": "mm", "up_axis": "z", "base_plate": "false"}
+    baseline = post(client, files, data)
+    disabled = post(client, files, dict(data, optimise="false"))
+    assert baseline.status_code == disabled.status_code == 200
+    assert disabled.content == baseline.content
+    assert disabled.headers["x-print-report"] == baseline.headers["x-print-report"]
+    assert "optimise" not in json.loads(disabled.headers["x-print-report"])
+    assert "optimise" not in stages
+    stages.clear()
+    enabled = post(client, files, dict(data, optimise="true"))
+    stl, rep = report(enabled)
+    assert "optimise" in rep and "skipped" not in rep["optimise"], rep
+    assert stl.is_watertight and rep["printability"]["printable"]
+    assert rep["volume_cm3"] < json.loads(baseline.headers["x-print-report"])["volume_cm3"]
+    before = rep["optimise"]["volume_cm3_before"]
+    assert stl.volume / 1000 == pytest.approx(rep["optimise"]["volume_cm3_after"], abs=.051)
+    assert 100 * (1 - stl.volume / 1000 / before) == pytest.approx(
+        rep["optimise"]["volume_saved_pct"], abs=.01)
+    assert api.printability.fix(stl.copy()).volume == pytest.approx(stl.volume, rel=1e-6)
+    assert rep["printability"]["parts"] == 1
+    assert not any("float" in w or "separate parts" in w for w in rep["printability"]["warnings"])
+    assert stages.index("repair") < stages.index("optimise") < stages.index("export")
+    assert api.STAGES["optimise"] == (.80, "Removing unloaded material")
+
+
 def test_photo_uses_measured_height(client, monkeypatch):
     def fake_triposr(image_path, out_path, **_):
         trimesh.creation.cylinder(radius=0.3, height=0.8).export(out_path)
