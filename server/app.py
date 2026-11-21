@@ -43,6 +43,7 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
+from server.photo_check import router as photo_check_router
 from server.print_api import reject_unauthorized_print, router as print_router
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -351,6 +352,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.manager = manager
     app.middleware("http")(reject_unauthorized_print)
     app.include_router(print_router)
+    app.include_router(photo_check_router)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:

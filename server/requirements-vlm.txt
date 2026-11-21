@@ -1,0 +1,7 @@
+# POST /photo-check's VLM (Qwen2.5-VL). Not installable next to TripoSR's transformers pin:
+# the Modal deploy runs it in its own container.
+torch==2.14.1
+torchvision==0.29.2
+transformers==4.57.6
+accelerate==1.15.0
+pillow>=10

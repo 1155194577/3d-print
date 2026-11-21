@@ -3,8 +3,8 @@
 A LiDAR-scanned mesh, or a photo plus its measured height, in; a printable STL out.
 
 Served by the same FastAPI app as the `/api/jobs` web uploader (`server/app.py`); the
-route lives in `server/print_api.py`. The Modal deploy exposes only `/print` and
-`/api/health`.
+route lives in `server/print_api.py`. The Modal deploy exposes only `/print`,
+`/photo-check` and `/api/health`.
 
 ```bash
 python -m uvicorn server.app:app --port 6006   # local (CPU works, photos are slow)
@@ -150,6 +150,49 @@ On Modal, job state lives in the `3d-print-jobs` modal.Dict, so any container ca
 container dies (a redeploy) turns into an error within 90 s. Nothing arrives while Modal cold-starts
 the GPU container (up to about 4 minutes).
 
+## `POST /photo-check`
+
+Run it on a Photo Print shot right after capture, before `/print`. A vision-language
+model (Qwen2.5-VL-3B, `server/photo_check.py`) looks for clutter and a cut-off object, and
+the phone's measured tilt catches a steep angle, so the app can ask for a retake and still
+offer to print anyway. Same bearer token as `/print`.
+
+`multipart/form-data`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `photo` | file | The shot: `.jpg`, `.png` or `.webp`. EXIF rotation is honoured. |
+| `camera_transform` | JSON, 16 floats | ARKit `camera.transform` at capture (column-major camera-to-world, +Y up), as sent to `/print`. Its pitch decides `steep_angle`; without it the angle is not checked (the model can't judge it: Qwen2.5-VL 3B and 7B both called a 54° top-down shot "eye level"). |
+
+`200`, JSON:
+
+```json
+{
+  "ok": false,
+  "issues": [
+    {"code": "steep_angle", "message": "The camera is pointing down at the object. Hold the phone level with its middle and shoot it from the side."},
+    {"code": "cluttered_background", "message": "There are other things around the object. Move it to a clear spot or clear the background."}
+  ],
+  "angle_checked": true,
+  "camera_pitch_deg": 54.0,
+  "max_pitch_deg": 30.0,
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "answers": {"cluttered_background": "Yes.", "cut_off": "Yes."}
+}
+```
+
+- `ok`: `true` when `issues` is empty; print straight away.
+- `issues[].code`, in this order: `steep_angle` (camera tilted more than `max_pitch_deg`, default 30, below level), `cluttered_background` (other things around or behind the object), `cut_off` (part of the object outside the frame). Codes are stable; show `message` to the user.
+- `angle_checked` / `camera_pitch_deg`: whether `camera_transform` was sent, and its pitch (0 level, 90 straight down).
+- `answers`: the model's raw replies to its two yes/no questions (`cut_off` asks "is the whole object inside?"), for debugging.
+
+Errors are JSON `{"detail": "..."}`: 400 empty photo or malformed `camera_transform`, 401 token,
+413 over 25 MB, 415 extension, 422 unreadable image, 502 the model failed. A failed
+check should not block printing: the app can fall through to `/print`.
+
+Timing: about 1 s on a warm GPU; the model has its own container, so add ~30–60 s
+when it is cold.
+
 ## `GET /api/health`
 
 `{"status": "ok"}` (more fields locally), no auth.
@@ -159,6 +202,7 @@ the GPU container (up to about 4 minutes).
 ```bash
 curl -F mesh=@scan.usdz -H "Authorization: Bearer $TOKEN" $URL/print -o scan.stl
 curl -F photo=@mug.jpg -F height_mm=95 -H "Authorization: Bearer $TOKEN" $URL/print -o mug.stl
+curl -F photo=@mug.jpg -H "Authorization: Bearer $TOKEN" $URL/photo-check
 ```
 
 Timing: a mesh takes a few seconds; a photo about 10–20 s on a warm GPU, plus
