@@ -93,7 +93,7 @@ def main():
             print(json.dumps(row), flush=True)
             if args.save_meshes:
                 os.makedirs(args.save_meshes, exist_ok=True)
-                mesh.export(os.path.join(args.save_meshes, f"{os.path.splitext(name)[0]}_{scheme}.obj"))
+                mesh.export(os.path.join(args.save_meshes, f"{os.path.splitext(os.path.relpath(name))[0].replace(os.sep, '_')}_{scheme}.obj"))
 
     print("\nscheme                  IoU     chamfer%  triplane err   weights")
     for scheme in args.schemes:
