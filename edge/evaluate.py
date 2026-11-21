@@ -64,7 +64,7 @@ def main():
         models[scheme] = (enc, dec, torch.float16 if act else torch.float32)
 
     rows = []
-    for name, img in images.items():
+    for index, (name, img) in enumerate(images.items()):
         ref = None
         for scheme, (enc, dec, dtype) in models.items():
             t0 = time.time()
@@ -93,7 +93,7 @@ def main():
             print(json.dumps(row), flush=True)
             if args.save_meshes:
                 os.makedirs(args.save_meshes, exist_ok=True)
-                mesh.export(os.path.join(args.save_meshes, f"{os.path.splitext(os.path.relpath(name))[0].replace(os.sep, '_')}_{scheme}.obj"))
+                mesh.export(os.path.join(args.save_meshes, f"{index:02d}_{os.path.splitext(os.path.basename(name))[0]}_{scheme}.obj"))
 
     print("\nscheme                  IoU     chamfer%  triplane err   weights")
     for scheme in args.schemes:
