@@ -86,7 +86,8 @@ def register(payload, limit):
     uploads = {}
     for name, entry in entries.items():
         url = s3.generate_presigned_url("put_object", Params={"Bucket": target, "Key": entry["key"],
-                                       "ContentType": entry["content_type"]}, ExpiresIn=EXPIRES_IN)
+                                       "ContentType": entry["content_type"], "ContentLength": entry["size"]},
+                                        ExpiresIn=EXPIRES_IN)
         uploads[name] = dict(url=url, method="PUT", headers={"Content-Type": entry["content_type"]})
     print_jobs.store.put(f"{job_id}:uploads", dict(created=time.time(), files={**previous["files"], **entries}))
     return dict(job_id=job_id, expires_in=EXPIRES_IN, uploads=uploads)

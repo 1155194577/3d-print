@@ -65,6 +65,7 @@ def test_presign_shape_and_repeat_same_job(s3_client):
     assert query["X-Amz-Expires"] == ["900"]
     assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
     assert "content-type" in query["X-Amz-SignedHeaders"][0].split(";")
+    assert "content-length" in query["X-Amz-SignedHeaders"][0].split(";")
     key = put(s3, first, "photo", b"first")
     second = register(client, files, first["job_id"])
     assert second["job_id"] == first["job_id"]
