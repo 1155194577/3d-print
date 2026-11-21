@@ -42,7 +42,7 @@ class Frame:
     @classmethod
     def load(cls, depth_path, width=None, height=None, confidence_path=None,
              intrinsics=None, camera_transform=None, image_orientation=1,
-             object_points=None):
+             object_points=None, depth_intrinsics=None, depth_extrinsics=None):
         if depth_path.lower().endswith(".png"):
             from PIL import Image
             try:
@@ -79,8 +79,33 @@ class Frame:
             raise ValueError('intrinsics wants JSON {"fx","fy","cx","cy","width","height"}')
         if min(fx, fy, pw, ph) <= 0:
             raise ValueError("intrinsics must be positive")
+        if not np.isfinite([fx, fy, cx, cy, pw, ph]).all() or max(pw, ph) > 20000:
+            raise ValueError("intrinsics must be finite with width/height <= 20000")
         sx, sy = w / pw, h / ph
         K = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1.0]])
+        photo_K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1.0]])
+        E = np.eye(4)
+        if depth_extrinsics is not None:
+            try:
+                vals = np.asarray(json.loads(depth_extrinsics), dtype=float)
+                if vals.shape != (16,) or not np.isfinite(vals).all():
+                    raise ValueError
+                E = vals.reshape(4, 4).T
+            except (ValueError, TypeError):
+                raise ValueError("depth_extrinsics wants a JSON array of 16 finite floats")
+        if depth_intrinsics is not None:
+            try:
+                dk = json.loads(depth_intrinsics)
+                df, dg, dc, dd, dw, dh = (float(dk[n]) for n in
+                                          ("fx", "fy", "cx", "cy", "width", "height"))
+                if not np.isfinite([df, dg, dc, dd, dw, dh]).all() or min(df, dg, dw, dh) <= 0:
+                    raise ValueError
+                if max(dw, dh) > 20000:
+                    raise ValueError
+                K = np.array([[df * w / dw, 0, dc * w / dw],
+                              [0, dg * h / dh, dd * h / dh], [0, 0, 1.]])
+            except (ValueError, KeyError, TypeError):
+                raise ValueError('depth_intrinsics wants JSON {"fx","fy","cx","cy","width","height"}')
 
         T = None
         if camera_transform:
@@ -101,16 +126,21 @@ class Frame:
                 taps = np.array(json.loads(object_points), dtype=float).reshape(-1, 2)
             except (ValueError, TypeError):
                 raise ValueError("object_points wants JSON [[u, v], ...] in photo pixels")
-            taps = taps * [sx, sy]
-        return cls(depth, K, conf, T, image_orientation, (pw, ph), taps)
+            if depth_intrinsics is None:
+                taps = taps * [sx, sy]
+        frame = cls(depth, K, conf, T, image_orientation, (pw, ph), taps)
+        frame.depth_to_photo = E
+        frame.photo_K = photo_K if depth_intrinsics is not None else None
+        return frame
 
     def up_camera(self):
-        """World up in OpenCV camera coordinates (x right, y down, z forward)."""
+        """World up in OpenCV depth camera coordinates (x right, y down, z forward)."""
         if self.camera_to_world is not None:
             up = CV_FROM_ARKIT @ (self.camera_to_world[:3, :3].T @ [0.0, 1.0, 0.0])
         else:  # the upright direction of the photo, as EXIF would rotate it
             up = {1: [0, -1, 0], 3: [0, 1, 0], 6: [-1, 0, 0], 8: [1, 0, 0]}[self.image_orientation]
         up = np.asarray(up, dtype=float)
+        up = getattr(self, "depth_to_photo", np.eye(4))[:3, :3].T @ up
         return up / np.linalg.norm(up)
 
 
@@ -175,6 +205,43 @@ def _object_mask(mask, taps):
     return labels == (1 + int(np.argmax(sizes)))
 
 
+def _depth_mask(frame, mask):
+    from PIL import Image
+    from scipy import ndimage
+
+    h, w = frame.depth.shape
+    mask = np.asarray(mask)
+    mask = mask.astype(np.uint8) * 255 if mask.dtype == bool else mask.astype(np.uint8)
+    if getattr(frame, "photo_K", None) is None:
+        return _object_mask(np.asarray(Image.fromarray(mask).resize((w, h), Image.NEAREST)) > 127,
+                            frame.taps)
+    pw, ph = frame.photo_size
+    mask = mask > 127
+    mh, mw = mask.shape
+    points = backproject(np.nan_to_num(frame.depth), frame.K)
+    E = frame.depth_to_photo
+    photo = points @ E[:3, :3].T + E[:3, 3]
+    projected = photo @ frame.photo_K.T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uv = projected[..., :2] / projected[..., 2:]
+    valid = np.isfinite(uv).all(-1) & (photo[..., 2] > 0) & np.isfinite(frame.depth)
+    ix = np.floor(np.clip(np.nan_to_num(uv[..., 0]) * (mw / pw), -1, mw)).astype(int)
+    iy = np.floor(np.clip(np.nan_to_num(uv[..., 1]) * (mh / ph), -1, mh)).astype(int)
+    valid &= (ix >= 0) & (ix < mw) & (iy >= 0) & (iy < mh)
+    registered = np.zeros((h, w), bool)
+    registered[valid] = mask[iy[valid], ix[valid]]
+    taps = None
+    if frame.taps is not None and valid.any():
+        vu = np.argwhere(valid)
+        taps = [vu[np.argmin(np.sum((uv[valid] - tap) ** 2, axis=1))][::-1]
+                for tap in frame.taps]
+    valid_depth = np.isfinite(frame.depth) & (frame.depth > 0.05) & (frame.depth < 5.0)
+    if frame.confidence is not None:
+        valid_depth &= frame.confidence >= 1
+    connected = registered | (ndimage.binary_closing(registered, iterations=3) & ~valid_depth)
+    return _object_mask(connected, taps) & registered
+
+
 def _umeyama(src, dst):
     """Similarity (s, R, t) with dst ≈ s R src + t."""
     mu_s, mu_d = src.mean(0), dst.mean(0)
@@ -211,17 +278,36 @@ def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
     `mask` is the photo's foreground (any resolution; resized to the depth map).
     Returns (mesh in metres with z up and the floor at z=0, report dict).
     """
+    return _fuse(mesh, frame, mask, yaw_starts, max_points)
+
+
+def fuse_face(mesh, frame, mask, face_to_world=None):
+    """Fuse a bust in a gravity frame whose origin is the horizontal neck cut."""
+    return _fuse(mesh, frame, mask, 8, 4000, face=True, face_to_world=face_to_world)
+
+
+def cut_bust(mesh, height):
     import trimesh
-    from PIL import Image
+
+    try:
+        cut = trimesh.intersections.slice_mesh_plane(
+            mesh, [0, 0, 1], [0, 0, height], cap=True)
+    except (ValueError, IndexError) as exc:
+        raise FusionError(f"could not cap bust: {exc}") from exc
+    if len(cut.vertices) == 0:
+        raise FusionError("no mesh above bust cut")
+    cut.apply_translation([0, 0, -height])
+    return cut
+
+
+def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=None):
+    import trimesh
     from scipy import ndimage, sparse
     from scipy.spatial import cKDTree
 
     depth, K = frame.depth, frame.K
     h, w = depth.shape
-    mask = np.asarray(Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255 if np.asarray(mask).dtype == bool
-                                      else np.asarray(mask, dtype=np.uint8))
-                      .resize((w, h), Image.NEAREST)) > 127
-    mask = _object_mask(mask, frame.taps)
+    mask = _depth_mask(frame, mask)
 
     valid = np.isfinite(depth) & (depth > 0.05) & (depth < 5.0)
     if frame.confidence is not None:
@@ -229,7 +315,7 @@ def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
     P = backproject(np.nan_to_num(depth), K)
 
     up = frame.up_camera()
-    floor = _fit_floor(P[valid & ~ndimage.binary_dilation(mask, iterations=3)], up)
+    floor = None if face else _fit_floor(P[valid & ~ndimage.binary_dilation(mask, iterations=3)], up)
     if floor is not None:
         up, origin = floor
     obj = valid & ndimage.binary_erosion(mask, iterations=2)
@@ -239,13 +325,25 @@ def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
     med = np.median(pts[:, 2])
     mad = np.median(np.abs(pts[:, 2] - med))
     pts = pts[np.abs(pts[:, 2] - med) < max(0.1, 6 * mad)]
-    if floor is None:
+    if face:
+        pts = pts[pts[:, 2] <= pts[:, 2].min() + 0.25]
+        if face_to_world is not None:
+            if frame.camera_to_world is None:
+                raise FusionError("face_transform requires camera_transform")
+            head = np.linalg.inv(frame.camera_to_world) @ face_to_world[:, 3]
+            head_cv = CV_FROM_ARKIT @ head[:3]
+            E = getattr(frame, "depth_to_photo", np.eye(4))
+            origin = E[:3, :3].T @ (head_cv - E[:3, 3]) - 0.12 * up
+        else:
+            cut = max((pts @ up).max() - 0.24, (pts @ up).min())
+            origin = up * cut
+    elif floor is None:
         origin = pts[np.argmin(pts @ up)]
-    pts = pts[(pts - origin) @ up > 0.004]
+    pts = pts[(pts - origin) @ up > (0 if face else 0.004)]
     if len(pts) < MIN_POINTS:
-        raise FusionError(f"only {len(pts)} depth points above the floor")
+        raise FusionError(f"only {len(pts)} depth points above the {'cut' if face else 'floor'}")
 
-    # gravity frame G: z up, floor at z=0, x along the camera's horizontal right
+    # gravity frame G: z up, floor/cut at z=0, x along the camera's horizontal right
     # (a portrait frame has the camera's x vertical; use its y then)
     ref = np.eye(3)[0 if abs(up[0]) < 0.9 else 1]
     x = ref - (ref @ up) * up
@@ -265,19 +363,22 @@ def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
     fwd[2] = 0
     fwd /= max(np.linalg.norm(fwd), 1e-9)
     centre = lidar.mean(0)
-    centre[2] = 0
+    centre[2] = lidar[:, 2].max() if face else 0
     best = None
     for k in range(yaw_starts):
         Rm = _rot_z(2 * np.pi * k / yaw_starts)
-        # mesh -> G guess: scale s0, yaw, bottom on the floor, pushed behind the visible side
+        # mesh -> G guess: scale, yaw, bottom on floor or top aligned, behind visible side
         ext = (Rm @ (hi - lo) * s0)
         t = centre + fwd * 0.25 * np.abs(ext[:2]).mean() - s0 * Rm @ [(lo[0] + hi[0]) / 2,
-                                                                     (lo[1] + hi[1]) / 2, lo[2]]
-        # ICP moves the LiDAR points into mesh space: invert the guess
-        init = (1 / s0, Rm.T, -(Rm.T @ t) / s0)
-        s, R, tt, rmse = _icp(lidar, tree, target, init)
-        if best is None or rmse < best[3]:
-            best = (s, R, tt, rmse)
+                                                                     (lo[1] + hi[1]) / 2, hi[2] if face else lo[2]]
+        for factor in ([1.0, 1.5, 2.0] if face else [1.0]):
+            scale = s0 * factor
+            translation = t if factor == 1 else centre + (t - centre) * factor
+            # ICP moves the LiDAR points into mesh space: invert the guess
+            init = (1 / scale, Rm.T, -(Rm.T @ translation) / scale)
+            s, R, tt, rmse = _icp(lidar, tree, target, init)
+            if best is None or rmse < best[3]:
+                best = (s, R, tt, rmse)
     s, R, tt, rmse = best
     # mesh -> G is the inverse of G -> mesh
     v_g = (mesh.vertices - tt) @ R / s
@@ -315,12 +416,18 @@ def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
     for _ in range(15):  # fade the correction into the hidden side
         disp[~seen] = 0.85 * (W @ disp)[~seen]
     fused = trimesh.Trimesh(to_g(v_c + disp), mesh.faces, process=False)
+    if face:
+        fused = cut_bust(fused, 0)
 
-    return fused, {
+    report = {
         "lidar_points": int(len(pts)),
         "icp_rmse_mm": round(rmse * 1000, 2),
         "scale": round(float(1 / s), 5),
         "seen_vertices": round(float(seen.mean()), 3),
-        "floor": "camera gravity + plane" if floor is not None and frame.camera_to_world is not None
-                 else "plane" if floor is not None else "lowest point",
     }
+    if face:
+        report["cut"] = "face anchor" if face_to_world is not None else "top - 24 cm"
+    else:
+        report["floor"] = ("camera gravity + plane" if floor is not None and frame.camera_to_world is not None
+                           else "plane" if floor is not None else "lowest point")
+    return fused, report

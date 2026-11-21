@@ -178,6 +178,8 @@ def _parse_bed(fit_bed):
 def print_stl(
     mesh: UploadFile | None = File(None, description="LiDAR scan: usdz/obj/ply/glb/stl"),
     photo: UploadFile | None = File(None, description="photo: jpg/png/webp"),
+    mode: str = Form("object", pattern="^(object|face)$"),
+    face_transform: str | None = Form(None, description="16 floats, column-major ARFaceAnchor transform"),
     height_mm: float | None = Form(None, gt=0, description="measured object height, mm"),
     units: str = Form("m", pattern="^(m|cm|mm)$"),
     up_axis: str = Form("y", pattern="^(y|z)$"),
@@ -188,8 +190,10 @@ def print_stl(
     depth_height: int | None = Form(None, gt=0),
     depth_confidence: UploadFile | None = File(None, description="ARKit confidenceMap: uint8 0/1/2"),
     intrinsics: str | None = Form(None, description='{"fx","fy","cx","cy","width","height"} in photo px'),
+    depth_intrinsics: str | None = Form(None, description="depth camera intrinsics JSON"),
+    depth_extrinsics: str | None = Form(None, description="16 floats, column-major depth-to-photo, OpenCV axes"),
     camera_transform: str | None = Form(None, description="16 floats, column-major camera-to-world"),
-    image_orientation: int = Form(1),
+    image_orientation: int | None = Form(None),
     object_points: str | None = Form(None, description="[[u, v], ...] taps on the object, photo px"),
     job_id: str | None = Form(None, description="client-chosen UUID; a retry with it joins the job"),
     authorization: str | None = Header(None),
@@ -198,19 +202,33 @@ def print_stl(
     _check_auth(authorization)
     if (mesh is None) == (photo is None):
         raise HTTPException(400, "send exactly one of `mesh` or `photo`")
+    if mode == "face" and photo is None:
+        raise HTTPException(400, "mode=face requires `photo`")
+    face_to_world = None
+    if mode == "face" and face_transform is not None:
+        import numpy as np
+
+        try:
+            vals = np.asarray(json.loads(face_transform), dtype=float)
+            if vals.shape != (16,) or not np.isfinite(vals).all():
+                raise ValueError
+            face_to_world = vals.reshape(4, 4).T
+        except (ValueError, TypeError):
+            raise HTTPException(400, "face_transform wants a JSON array of 16 finite floats")
     bed = _parse_bed(fit_bed)
     if depth is not None and photo is None:
         raise HTTPException(400, "`depth` goes with `photo`")
+    if image_orientation is not None and image_orientation not in (1, 3, 6, 8):
+        raise HTTPException(400, "image_orientation must be 1, 3, 6 or 8")
     try:
         job_id = str(uuid.UUID(job_id)) if job_id else str(uuid.uuid4())
     except ValueError:
         raise HTTPException(400, "`job_id` must be a UUID")
-    fusion = None
-
     base_thickness = 3.0
     plate_height = max(base_thickness - 0.5, 0.0) if base_plate else 0.0
     # height_mm is the object itself; prepare_mesh's height includes the plate.
-    height = height_mm + plate_height if height_mm else None
+    object_height = height_mm if height_mm is not None else (100 if mode == "face" else None)
+    height = object_height + plate_height if object_height else None
 
     workdir = tempfile.mkdtemp(prefix="print_")
     try:
@@ -228,17 +246,18 @@ def print_stl(
                 try:
                     frame = depth_fusion.Frame.load(
                         dpath, depth_width, depth_height, cpath, intrinsics,
-                        camera_transform, image_orientation, object_points)
+                        camera_transform, image_orientation or 1, object_points,
+                        depth_intrinsics, depth_extrinsics)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc))
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-
     name = os.path.splitext(os.path.basename(stem or "model"))[0] or "model"
     job = dict(src=src, is_mesh=mesh is not None, frame=frame, height=height, bed=bed,
                base_plate=base_plate, base_thickness=base_thickness,
-               units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir)
+               units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
+               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation)
 
     if _wants_ndjson(accept):
         def run(progress):
@@ -328,6 +347,7 @@ HEARTBEAT_S = 2.0
 def _make_stl(job, progress):
     """The slow part of /print. Returns (stl bytes, report); raises HTTPException."""
     src, frame, height = job["src"], job["frame"], job["height"]
+    mode = job["mode"]
     fusion = None
     if job["is_mesh"]:
         kwargs = dict(units_to_mm=job["units_to_mm"], up_axis=job["up_axis"])
@@ -336,9 +356,12 @@ def _make_stl(job, progress):
         try:
             mask = None
             if frame is None:
-                reconstruct_photo(img, src, progress=progress)
+                orientation = job["image_orientation"]
+                turns = {1: 0, 3: 2, 6: 3, 8: 1}.get(orientation)
+                reconstruct_photo(img, src, quarter_turns=turns, progress=progress)
             else:
-                turns = depth_fusion.upright_turns(frame.up_camera())
+                photo_up = frame.depth_to_photo[:3, :3] @ frame.up_camera()
+                turns = depth_fusion.upright_turns(photo_up)
                 reconstruct_photo(img, src, quarter_turns=turns, progress=progress)
                 progress("fuse")
                 mask = reconstruct_photo.foreground_mask(img)
@@ -349,13 +372,25 @@ def _make_stl(job, progress):
             import trimesh
 
             try:
-                fused, fusion = depth_fusion.fuse(trimesh.load(src, force="mesh"), frame, mask)
+                raw = trimesh.load(src, force="mesh")
+                if mode == "face":
+                    fused, fusion = depth_fusion.fuse_face(raw, frame, mask, job["face_to_world"])
+                else:
+                    fused, fusion = depth_fusion.fuse(raw, frame, mask)
                 src = os.path.join(job["workdir"], "fused.ply")
                 fused.export(src)
                 kwargs = dict(units_to_mm=1000.0, up_axis="z")
-                height = None
+                if mode != "face":
+                    height = None
             except depth_fusion.FusionError as exc:
                 fusion = {"skipped": str(exc)}
+        if mode == "face" and (frame is None or "skipped" in (fusion or {})):
+            import trimesh
+
+            raw = trimesh.load(src, force="mesh")
+            bust = depth_fusion.cut_bust(raw, raw.bounds[0, 2] + 0.2 * raw.extents[2])
+            src = os.path.join(job["workdir"], "bust.ply")
+            bust.export(src)
     progress("repair")
     try:
         out, report = img2mesh.prepare_mesh(
@@ -372,6 +407,7 @@ def _make_stl(job, progress):
 
     ex = report["extents"]
     return body, {
+        **({"mode": "face"} if mode == "face" else {}),
         "extents_mm": [round(float(v), 1) for v in ex],
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),

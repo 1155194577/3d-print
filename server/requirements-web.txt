@@ -3,6 +3,9 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 usd-core>=24.0          # USDZ scans for POST /print
+shapely>=2.0           # planar bust caps
+mapbox-earcut>=1.0
+rtree>=1.0
 
 # tests only
 pytest>=8.0
