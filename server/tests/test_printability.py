@@ -90,3 +90,10 @@ def test_tiny_model_wall_check_is_cheap():
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
     assert r["min_wall_mm"] is not None and peak < 200e6
+
+
+def test_inverted_part_outside_others_still_floats():
+    stray = box(5, 5, 5).apply_translation([20, 0, 20])
+    stray.invert()
+    r = p.check(trimesh.util.concatenate([box(10, 10, 10), stray]))
+    assert any("float" in w for w in r["warnings"])

@@ -134,9 +134,14 @@ def fix(m):
 
 
 def _floating(parts, z0):
-    """Parts that don't reach the bed. An inward-facing shell is a sealed cavity, not a part."""
-    return [p for p in parts if p.bounds[0, 2] - z0 > BED_TOL_MM
-            and not (p.is_watertight and p.volume < 0)]
+    """Parts that don't reach the bed. An inward-facing shell inside another part is a sealed
+    cavity, not a part."""
+    def cavity(p):
+        return p.is_watertight and p.volume < 0 and any(
+            q is not p and (q.bounds[0] <= p.bounds[0]).all() and (q.bounds[1] >= p.bounds[1]).all()
+            for q in parts)
+
+    return [p for p in parts if p.bounds[0, 2] - z0 > BED_TOL_MM and not cavity(p)]
 
 
 def _wall_thickness(m, probes, seed, reach=3.0):
