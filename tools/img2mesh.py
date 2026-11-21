@@ -75,6 +75,7 @@ def find_mesh(workdir, index):
     return None
 
 
+USD_EXTS = (".usdz", ".usd", ".usdc", ".usda")
 MESH_EXTS = (".obj", ".ply", ".usdz", ".usd", ".usdc", ".usda", ".glb", ".gltf", ".stl", ".off")
 UNITS_TO_MM = {"m": 1000.0, "cm": 10.0, "mm": 1.0}
 
@@ -135,7 +136,7 @@ def load_mesh(src_path, up_axis="z"):
     import trimesh
 
     ext = os.path.splitext(src_path)[1].lower()
-    if ext in (".usdz", ".usd", ".usdc", ".usda"):
+    if ext in USD_EXTS:
         m, up_axis = _load_usd(src_path)
     else:
         m = trimesh.load(src_path, force="mesh")
@@ -160,6 +161,8 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
     import trimesh
 
     m = load_mesh(src_path, up_axis)
+    if units_to_mm and os.path.splitext(src_path)[1].lower() in USD_EXTS:
+        units_to_mm = 1000.0  # load_mesh already converted the stage to metres
     if len(m.faces) == 0:
         raise SystemExit(f"Empty mesh: {src_path}")
 
@@ -433,6 +436,8 @@ def main():
             else:
                 stem = os.path.splitext(os.path.basename(img))[0]
                 out_path = os.path.join(args.outdir, f"{stem}.{args.format}")
+                if os.path.abspath(out_path) == os.path.abspath(img):
+                    out_path = os.path.join(args.outdir, f"{stem}_print.{args.format}")
 
             mesh.export(out_path)
 
