@@ -21,6 +21,7 @@ TRIPOSR_DIR = os.path.join(ROOT, "research", "triposr")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import depth_fusion  # noqa: E402
 import img2mesh  # noqa: E402
+import photo_level  # noqa: E402
 
 MAX_UPLOAD_BYTES = int(os.environ.get("PRINT_MAX_UPLOAD_MB", "200")) * 1024 * 1024
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
@@ -204,6 +205,12 @@ def print_stl(
             stem = photo.filename
             src = os.path.join(workdir, "raw.obj")
             frame = None
+            gravity = None
+            if camera_transform and depth is None:
+                try:
+                    gravity = photo_level.photo_up(camera_transform, image_orientation)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc))
             if depth is not None:
                 dpath = _save_upload(depth, DEPTH_EXTS, workdir, "depth")
                 cpath = (_save_upload(depth_confidence, CONFIDENCE_EXTS, workdir, "confidence")
@@ -217,7 +224,7 @@ def print_stl(
             try:
                 mask = None
                 if frame is None:
-                    reconstruct_photo(img, src)
+                    reconstruct_photo(img, src, **({"quarter_turns": gravity[1]} if gravity else {}))
                 else:
                     turns = depth_fusion.upright_turns(frame.up_camera())
                     reconstruct_photo(img, src, quarter_turns=turns)
@@ -236,6 +243,8 @@ def print_stl(
                     height = None
                 except depth_fusion.FusionError as exc:
                     fusion = {"skipped": str(exc)}
+            if not fusion or "skipped" in fusion:
+                kwargs.update(photo_level=True, gravity=gravity)
         try:
             out, report = img2mesh.prepare_mesh(
                 src, height=height, fit_bed=bed, base_plate=base_plate,
@@ -256,6 +265,7 @@ def print_stl(
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),
         "faces": int(report["faces"]),
+        **({"level": report["level"]} if "level" in report else {}),
         "volume_cm3": round(report["volume_cm3"], 1) if report["volume_cm3"] else None,
         "scale": report["scale_note"],
     }

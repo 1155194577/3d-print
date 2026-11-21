@@ -151,7 +151,7 @@ def load_mesh(src_path, up_axis="z"):
 
 def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
                  base_plate=True, base_thickness=3.0, target_format="stl",
-                 units_to_mm=None, up_axis="z"):
+                 units_to_mm=None, up_axis="z", photo_level=False, gravity=None):
     """Scale, flatten, base-plate, repair. Returns (mesh, report).
 
     With `units_to_mm` (e.g. 1000 for a LiDAR scan in metres) and no
@@ -161,6 +161,10 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
     import trimesh
 
     m = load_mesh(src_path, up_axis)
+    level = None
+    if photo_level:
+        from photo_level import level_mesh
+        level = level_mesh(m, gravity)
     if units_to_mm and os.path.splitext(src_path)[1].lower() in USD_EXTS:
         units_to_mm = 1000.0  # load_mesh already converted the stage to metres
     if len(m.faces) == 0:
@@ -299,6 +303,8 @@ def prepare_mesh(src_path, height=None, size=None, fit_bed=None,
         "overhang_frac": overhang,
         "volume_cm3": m.volume / 1000.0 if m.is_watertight else None,
     }
+    if level is not None:
+        report["level"] = level
     return m, report
 
 

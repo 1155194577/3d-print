@@ -44,7 +44,7 @@ only a fallback), the seen side is the LiDAR surface, and TripoSR fills in the h
 | `depth_width`, `depth_height` | int | depth map size, e.g. 256 × 192 (raw depth only) |
 | `depth_confidence` | file `.u8`, optional | `confidenceMap`, uint8 0/1/2, same size; 0 is dropped |
 | `intrinsics` | JSON | `{"fx","fy","cx","cy","width","height"}` in photo pixels; scaled to the depth size |
-| `camera_transform` | JSON, optional | 16 floats, column-major camera-to-world (ARKit, world +Y up): gravity for the floor and upright |
+| `camera_transform` | JSON, optional | 16 floats, column-major camera-to-world (ARKit, world +Y up): gravity for the floor and upright, also supported for photo-only requests without depth |
 | `image_orientation` | 1 \| 3 \| 6 \| 8 | EXIF value; upright fallback without `camera_transform` |
 | `object_points` | JSON, optional | `[[u, v], ...]` taps on the object in photo pixels; picks the object region |
 
@@ -53,6 +53,16 @@ plus a RANSAC plane), align the mesh by trimmed similarity ICP from 8 yaw starts
 seen vertices onto the depth surface and fade that into the hidden side, then the usual
 flatten / repair / base plate. Too few depth points on the object (< 200) falls back to the
 photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
+
+Photo meshes that were not depth-fused are leveled before scaling and adding the
+plate. Without a camera transform, the largest planar supporting convex-hull
+facet within 35° of down is aligned to down; objects without a suitable flat
+base are unchanged. With a transform (no depth required), camera gravity takes
+precedence, including the same sensor-image upright quarter turns as depth fusion;
+`image_orientation` is validated but does not override supplied gravity.
+`X-Print-Report` includes `"level": {"source": "gravity" | "base plane" | "none",
+"tilt_deg": 19.8}` for these photo meshes. The angle is the applied correction.
+Depth-fused meshes and uploaded meshes retain their existing behavior.
 
 ### Response
 
