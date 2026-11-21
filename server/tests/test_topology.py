@@ -75,6 +75,28 @@ def test_solver_failure_is_unchanged(monkeypatch):
     assert report == {"skipped": "optimisation failed: solver unavailable"}
 
 
+@pytest.mark.parametrize("force_void", [False, True])
+def test_subvoxel_bore_preserves_original_surface_clearance(monkeypatch, force_void):
+    block = trimesh.creation.box(extents=[40, 40, 60])
+    bore = trimesh.creation.cylinder(radius=1.25, height=70, sections=48)
+    mesh = trimesh.boolean.difference([block, bore], engine="manifold")
+    if force_void:
+        monkeypatch.setattr(topology, "_densities", lambda solid, *args: np.zeros(solid.shape))
+    result, report = topology.optimise(mesh)
+    if "skipped" in report:
+        assert result is mesh
+    else:
+        cavities = [p for p in result.split() if p.volume < 0]
+        assert cavities
+        for cavity in cavities:
+            points = topology._surface_samples(cavity, .5)
+            outer_distance = np.min(np.array([20, 20, 30]) - np.abs(points), axis=1)
+            bore_distance = np.linalg.norm(points[:, :2], axis=1) - 1.25
+            assert np.minimum(outer_distance, bore_distance).min() >= 2
+    if force_void:
+        assert report == {"skipped": "no cavities preserve clearance from the original surface"}
+
+
 def test_insignificant_saving_is_unchanged(monkeypatch):
     mesh = trimesh.creation.box(extents=[40, 40, 60])
     def tiny_void(solid, *args):

@@ -5,6 +5,7 @@ import time
 import numpy as np
 from scipy import ndimage, sparse
 from scipy.sparse.linalg import cg
+from scipy.spatial import cKDTree
 import trimesh
 
 
@@ -113,6 +114,50 @@ def _densities(solid, passive, iterations, fraction, deadline):
     return result
 
 
+def _surface_samples(mesh, spacing, with_faces=False):
+    triangles = mesh.triangles
+    edges = triangles - np.roll(triangles, 1, axis=1)
+    divisions = np.maximum(1, np.ceil(np.linalg.norm(edges, axis=2).max(axis=1) / spacing)).astype(int)
+    if np.sum((divisions + 1) * (divisions + 2) // 2) > 750000:
+        raise RuntimeError("surface clearance sample budget exceeded")
+    samples = []
+    for triangle, count in zip(triangles, divisions):
+        for row in range(count + 1):
+            u = row / count
+            v = np.arange(count - row + 1)[:, None] / count
+            samples.append(triangle[0] + u * (triangle[1] - triangle[0])
+                           + v * (triangle[2] - triangle[0]))
+    points = np.concatenate(samples)
+    if with_faces:
+        return points, np.repeat(np.arange(len(triangles)), (divisions + 1) * (divisions + 2) // 2)
+    return points
+
+
+def _clear_cavities(cavity, original, shell_mm):
+    spacing = shell_mm / 2
+    samples, face_ids = _surface_samples(original, spacing, with_faces=True)
+    tree = cKDTree(samples)
+    cavity_spacing = shell_mm / 4
+    clearance = shell_mm + cavity_spacing
+    safe = []
+    for component in cavity.split(only_watertight=False):
+        points = _surface_samples(component, cavity_spacing)
+        distances, _ = tree.query(points)
+        valid = True
+        for point in points[distances < clearance + spacing]:
+            neighbors = tree.query_ball_point(point, clearance + spacing)
+            triangles = original.triangles[np.unique(face_ids[neighbors])]
+            closest = trimesh.triangles.closest_point(triangles, np.broadcast_to(point, (len(triangles), 3)))
+            # Original samples cover each triangle within spacing; check every
+            # candidate exactly, allowing for the unsampled cavity surface too.
+            if np.linalg.norm(closest - point, axis=1).min() < clearance:
+                valid = False
+                break
+        if valid:
+            safe.append(component)
+    return trimesh.util.concatenate(safe) if safe else None
+
+
 def optimise(mesh, shell_mm=2.0, volume_fraction=0.4, iterations=30):
     """Subtract enclosed low-stress cavities, or return the input unchanged on failure.
 
@@ -155,6 +200,9 @@ def optimise(mesh, shell_mm=2.0, volume_fraction=0.4, iterations=30):
         vertices += grid.transform[:3, 3] - pitch
         cavity = trimesh.Trimesh(vertices=vertices, faces=faces)
         cavity.fix_normals()
+        cavity = _clear_cavities(cavity, mesh, shell_mm)
+        if cavity is None:
+            return mesh, {"skipped": "no cavities preserve clearance from the original surface"}
         result = trimesh.boolean.difference([mesh, cavity], engine="manifold")
         if not result.is_volume or not np.allclose(result.bounds, mesh.bounds, atol=1e-4):
             return mesh, {"skipped": "subtraction did not preserve the closed outer surface"}
