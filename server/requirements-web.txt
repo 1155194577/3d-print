@@ -2,6 +2,7 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 python-multipart>=0.0.9
+usd-core>=24.0          # USDZ scans for POST /print
 
 # tests only
 pytest>=8.0

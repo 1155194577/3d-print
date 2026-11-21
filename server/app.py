@@ -12,6 +12,8 @@ Endpoints
     GET  /api/jobs/{id}/model         finished STL
     GET  /api/jobs/{id}/preview.png   three-view render of the result
     GET  /api/health                  liveness + pipeline availability
+    POST /print                       mesh or photo (+ height) -> STL, synchronous
+                                      (server/print_api.py, contract in server/README.md)
 
 Configuration (all optional, via environment)
     TRIPOSR_BIN       path to the triposr CLI        (default: <repo>/bin/triposr)
@@ -40,6 +42,8 @@ from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+
+from server.print_api import router as print_router
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -345,6 +349,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="3d-print", description="Photo → printable STL", version="1.0.0")
     app.state.settings = settings
     app.state.manager = manager
+    app.include_router(print_router)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
