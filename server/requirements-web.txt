@@ -11,7 +11,7 @@ usd-core>=24.0          # USDZ scans for POST /print
 shapely>=2.0           # planar bust caps
 mapbox-earcut>=1.0
 rtree>=1.0
+httpx>=0.27            # SiliconFlow vision API
 
 # tests only
 pytest>=8.0
-httpx>=0.27

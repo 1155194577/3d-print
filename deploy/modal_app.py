@@ -1,9 +1,8 @@
 """Always-warm CPU uploads/streams, with independently scheduled GPU print jobs.
 
 Only the synchronous routes are exposed, behind PRINT_API_TOKEN; the browser
-uploader and its in-memory /api/jobs queue stay local-only. /photo-check's VLM
-needs a newer transformers than TripoSR, so it runs in its own GPU container
-(PhotoCheckVLM) that the web function calls.
+uploader and its in-memory /api/jobs queue stay local-only. /photo-check calls
+SiliconFlow over HTTPS directly from the CPU web function.
 
     modal secret create 3d-print-api PRINT_API_TOKEN=<random token>
     modal deploy deploy/modal_app.py
@@ -51,24 +50,6 @@ image = (
 )
 
 
-def download_vlm():
-    from huggingface_hub import snapshot_download
-
-    from server.vlm import VLM_MODEL
-
-    snapshot_download(VLM_MODEL)
-
-
-vlm_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install_from_requirements(str(ROOT / "server" / "requirements-vlm.txt"))
-    .env({"HF_HOME": f"{MODELS}/hf", "TOKENIZERS_PARALLELISM": "false", "PYTHONWARNINGS": "ignore",
-          "PYTHONPATH": APP_DIR})
-    .add_local_file(ROOT / "server" / "vlm.py", f"{APP_DIR}/server/vlm.py", copy=True)
-    .add_local_file(ROOT / "server" / "__init__.py", f"{APP_DIR}/server/__init__.py", copy=True)
-    .run_function(download_vlm)
-)
-
 cpu_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install_from_requirements(str(ROOT / "server" / "requirements-web.txt"))
@@ -100,27 +81,13 @@ def run_print(job_id, spec):
     print_jobs.run_existing(job_id, run)
 
 
-@app.cls(image=vlm_image, gpu="L4", timeout=120, scaledown_window=300)
-@modal.concurrent(max_inputs=4)
-class PhotoCheckVLM:
-    @modal.enter()
-    def load(self):
-        from server.vlm import QwenVLM
-
-        self.vlm = QwenVLM()
-        self.vlm.load()
-
-    @modal.method()
-    def ask(self, jpeg: bytes, questions: dict) -> dict:
-        return self.vlm(jpeg, questions)
-
-
 @app.function(
     image=cpu_image,
     min_containers=1,
     timeout=1800,
     scaledown_window=300,
-    secrets=[modal.Secret.from_name("3d-print-api"), modal.Secret.from_name("3d-print-s3")],
+    secrets=[modal.Secret.from_name("3d-print-api"), modal.Secret.from_name("3d-print-s3"),
+             modal.Secret.from_name("3d-print-siliconflow")],
 )
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()
@@ -130,7 +97,7 @@ def web():
 
     sys.path.insert(0, APP_DIR)
     from fastapi import HTTPException
-    from server import photo_check, print_api, print_spec
+    from server import print_api, print_spec
     from server.print_api import create_print_app
     from server import print_jobs
 
@@ -153,5 +120,4 @@ def web():
             shutil.rmtree(job["workdir"], ignore_errors=True)
 
     print_api.submit_job = submit
-    photo_check.vlm = PhotoCheckVLM().ask.remote
     return create_print_app()
