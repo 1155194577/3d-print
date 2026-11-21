@@ -165,7 +165,7 @@ flushed as it goes:
 ```
 
 - Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`, `check`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
-- The current stage repeats every 2 s as a heartbeat. Its `progress` creeps toward the next stage's start and never reaches it.
+- The current stage repeats about every 2 s as a heartbeat, including during slow job-store reads. Its `progress` creeps toward the next stage's start and never reaches it. Mesh work runs in a separate, persistent spawned process so native fusion/repair cannot hold the HTTP interpreter's GIL. The worker retains TripoSR between jobs and processes one job at a time.
 - The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either means the connection dropped, not that the print failed: resume it.
 - Optional form field `job_id` (a UUID the app picks). A retry with the same id joins that job instead of starting a second print.
 

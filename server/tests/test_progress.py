@@ -83,6 +83,26 @@ def test_validation_errors_stay_plain_http(client, monkeypatch):
     assert resp.status_code == 401
 
 
+@pytest.mark.parametrize("status,method,path,kwargs,detail", [
+    (400, "POST", "/print", {}, "send exactly one"),
+    (401, "POST", "/print", {}, "missing or wrong bearer token"),
+    (404, "GET", "/print/unknown-job", {}, "no such print job"),
+    (405, "PUT", "/print", {}, "Method Not Allowed"),
+    (415, "POST", "/print", {"files": {"photo": ("a.heic", b"private-image")}}, "unsupported file type"),
+    (422, "POST", "/print", {"data": {"height_mm": "private-invalid-number"}}, "float_parsing"),
+])
+def test_print_4xx_logs_detail_not_credentials_or_body(client, monkeypatch, caplog,
+                                                      status, method, path, kwargs, detail):
+    if status == 401:
+        monkeypatch.setenv("PRINT_API_TOKEN", "private-server-token")
+    response = client.request(method, path, headers={"Authorization": "Bearer private-client-token"}, **kwargs)
+    assert response.status_code == status
+    records = [r.message for r in caplog.records if "print request rejected" in r.message]
+    assert len(records) == 1
+    assert f"status={status}" in records[0] and detail in records[0]
+    assert "private-" not in records[0]
+
+
 def test_without_accept_it_is_still_stl(client, monkeypatch):
     monkeypatch.setattr(api, "reconstruct_photo", slow_triposr)
     resp = client.post("/print", files={"photo": ("can.jpg", b"jpeg")})

@@ -2,13 +2,15 @@
 a printable STL out, in one synchronous request. Contract: server/README.md.
 
 Unlike the /api/jobs queue, which spawns bin/triposr per job, this keeps
-TripoSR loaded in-process, which is what a serverless GPU container wants.
+TripoSR loaded in a persistent worker process, isolated from the ASGI GIL.
 """
 
 import asyncio
 import base64
 import hmac
+from http import HTTPStatus
 import json
+import logging
 import math
 import os
 import shutil
@@ -19,8 +21,11 @@ import time
 import uuid
 
 from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TRIPOSR_DIR = os.path.join(ROOT, "research", "triposr")
@@ -31,6 +36,36 @@ import photo_level  # noqa: E402
 import printability  # noqa: E402
 
 from server import print_jobs  # noqa: E402
+from server.print_worker import execute_job  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+
+def _log_rejection(request, status, detail):
+    request.state.print_rejection_logged = True
+    route = request.scope.get("route")
+    logger.warning("print request rejected status=%s route=%s detail=%s", status,
+                   getattr(route, "path", "/print"), json.dumps(detail, ensure_ascii=True))
+
+
+class PrintRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def logged(request):
+            try:
+                return await handler(request)
+            except StarletteHTTPException as exc:
+                if 400 <= exc.status_code < 500:
+                    _log_rejection(request, exc.status_code, exc.detail)
+                raise
+            except RequestValidationError as exc:
+                _log_rejection(request, 422, [
+                    {key: error[key] for key in ("loc", "type", "msg")}
+                    for error in exc.errors()])
+                raise
+
+        return logged
 
 MAX_UPLOAD_BYTES = int(os.environ.get("PRINT_MAX_UPLOAD_MB", "200")) * 1024 * 1024
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
@@ -109,7 +144,7 @@ class PhotoReconstructor:
 
 
 reconstruct_photo = PhotoReconstructor()
-router = APIRouter()
+router = APIRouter(route_class=PrintRoute)
 
 
 def _check_auth(authorization):
@@ -127,8 +162,14 @@ async def reject_unauthorized_print(request: Request, call_next):
         try:
             _check_auth(request.headers.get("authorization"))
         except HTTPException as exc:
+            if request.url.path == "/print" or request.url.path.startswith("/print/"):
+                _log_rejection(request, exc.status_code, exc.detail)
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-    return await call_next(request)
+    response = await call_next(request)
+    if (request.url.path == "/print" or request.url.path.startswith("/print/")) and (
+            400 <= response.status_code < 500 and not getattr(request.state, "print_rejection_logged", False)):
+        _log_rejection(request, response.status_code, HTTPStatus(response.status_code).phrase)
+    return response
 
 
 def create_print_app():
@@ -272,7 +313,7 @@ def print_stl(
     if _wants_ndjson(accept):
         def run(progress):
             try:
-                return _make_stl(job, progress)
+                return execute_job(job, progress)
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
 
@@ -280,7 +321,7 @@ def print_stl(
             shutil.rmtree(workdir, ignore_errors=True)  # a retry: join the job already running
         return _ndjson(_events(job_id, accepted=True, with_stl=True))
     try:
-        body, summary = _make_stl(job, lambda *a: None)
+        body, summary = execute_job(job, lambda *a: None)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     return _stl_response(body, summary, f"{name}.stl")
@@ -482,6 +523,21 @@ def _line(state):
             "elapsed_s": elapsed}
 
 
+async def _wait_with_heartbeats(awaitable, progress, sent_at):
+    task = asyncio.create_task(awaitable)
+    try:
+        while True:
+            remaining = max(0, HEARTBEAT_S - (time.monotonic() - sent_at))
+            done, _ = await asyncio.wait({task}, timeout=remaining)
+            if done:
+                yield True, task.result()
+                return
+            sent_at = time.monotonic()
+            yield False, _line(progress)
+    finally:
+        task.cancel()
+
+
 async def _events(job_id, accepted, with_stl):
     """NDJSON: [accepted,] progress lines (repeated every HEARTBEAT_S), then done or error."""
     def out(obj):
@@ -491,23 +547,42 @@ async def _events(job_id, accepted, with_stl):
         yield out({"type": "accepted", "job_id": job_id})
     # every stage is sent once, in order, even ones that ended between two polls;
     # a resume starts from the current stage
-    sent, sent_at = (0 if accepted else None), 0.0
+    sent, sent_at = (0 if accepted else None), time.monotonic()
+    now = time.time()
+    last_progress = dict(type="progress", stage="received", since=now, created=now)
     while True:
-        state = await run_in_threadpool(print_jobs.get_state, job_id)
+        async for ready, value in _wait_with_heartbeats(
+                run_in_threadpool(print_jobs.get_state, job_id), last_progress, sent_at):
+            if not ready:
+                sent_at = time.monotonic()
+                yield out(value)
+            else:
+                state = value
         if state is None:
             yield out({"type": "error", "status": 404, "detail": "the print job expired"})
             return
         history, running = state.get("history", []), state["type"] == "progress"
+        if running:
+            last_progress = state
         if sent is None:
             sent = len(history) - running
         for stage in history[sent:len(history) - running]:
             yield out(_line(dict(state, type="progress", stage=stage, since=time.time())))
+            sent_at = time.monotonic()
         sent = max(sent, len(history) - running)
         line = _line(state)
         if state["type"] == "done":
             if with_stl:
-                body = await run_in_threadpool(print_jobs.get_stl, job_id)
-                line["stl_base64"] = base64.b64encode(body).decode()
+                def encoded_stl():
+                    return base64.b64encode(print_jobs.get_stl(job_id)).decode()
+
+                async for ready, value in _wait_with_heartbeats(
+                        run_in_threadpool(encoded_stl), last_progress, sent_at):
+                    if not ready:
+                        sent_at = time.monotonic()
+                        yield out(value)
+                    else:
+                        line["stl_base64"] = value
             yield out(line)
             return
         if state["type"] == "error":
