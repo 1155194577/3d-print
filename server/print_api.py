@@ -109,7 +109,7 @@ def _check_auth(authorization):
 
 async def reject_unauthorized_print(request: Request, call_next):
     """Check the token before the body is read, so anonymous uploads never spool."""
-    if request.url.path == "/print":
+    if request.url.path in ("/print", "/photo-check"):
         try:
             _check_auth(request.headers.get("authorization"))
         except HTTPException as exc:
@@ -118,10 +118,13 @@ async def reject_unauthorized_print(request: Request, call_next):
 
 
 def create_print_app():
-    """Just POST /print and a health check: what the serverless deploy exposes."""
+    """POST /print, POST /photo-check and a health check: what the serverless deploy exposes."""
+    from server.photo_check import router as photo_check_router
+
     app = FastAPI(title="3d-print /print")
     app.middleware("http")(reject_unauthorized_print)
     app.include_router(router)
+    app.include_router(photo_check_router)
 
     @app.get("/api/health")
     def health():
