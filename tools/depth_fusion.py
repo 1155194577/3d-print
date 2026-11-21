@@ -281,9 +281,114 @@ def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
     return _fuse(mesh, frame, mask, yaw_starts, max_points)
 
 
-def fuse_face(mesh, frame, mask, face_to_world=None):
+def fuse_face(mesh, frame, mask, face_to_world=None, views=None):
     """Fuse a bust in a gravity frame whose origin is the horizontal neck cut."""
-    return _fuse(mesh, frame, mask, 8, 4000, face=True, face_to_world=face_to_world)
+    return _fuse(mesh, frame, mask, 8, 4000, face=True, face_to_world=face_to_world,
+                 views=views)
+
+
+def _depth_to_world(frame):
+    flip = np.eye(4)
+    flip[:3, :3] = CV_FROM_ARKIT
+    return frame.camera_to_world @ flip @ getattr(frame, "depth_to_photo", np.eye(4))
+
+
+def _refine_view(points, target):
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(target)
+    moved = points.copy()
+    before = tree.query(points)[0]
+    overlap = before < 0.02
+    if overlap.sum() < MIN_POINTS:
+        return np.eye(4)
+    transform = np.eye(4)
+    for _ in range(8):
+        distances, indices = tree.query(moved)
+        keep = overlap & (distances < 0.02)
+        if keep.sum() < MIN_POINTS:
+            return np.eye(4)
+        a, b = moved[keep], target[indices[keep]]
+        ac, bc = a.mean(0), b.mean(0)
+        U, _, Vt = np.linalg.svd((b - bc).T @ (a - ac))
+        D = np.eye(3)
+        D[2, 2] = np.linalg.det(U @ Vt)
+        R = U @ D @ Vt
+        t = bc - R @ ac
+        step = np.eye(4)
+        step[:3, :3], step[:3, 3] = R, t
+        transform = step @ transform
+        moved = moved @ R.T + t
+    after = tree.query(moved)[0]
+    if (np.linalg.norm(moved - points, axis=1).max() > 0.015
+            or np.mean(after[overlap] ** 2) > np.mean(before[overlap] ** 2)):
+        return np.eye(4)
+    return transform
+
+
+def _face_views(frame, face_to_world, views, points, origin, up):
+    from scipy import ndimage
+
+    accepted, skipped = [], []
+    for index, view in enumerate(views or [], 1):
+        other, anchor = view.get("frame"), view.get("face_to_world")
+        reason = view.get("skipped")
+        if not reason and (face_to_world is None or frame.camera_to_world is None
+                           or anchor is None or other.camera_to_world is None):
+            reason = "missing face_transform or camera_transform"
+        if reason:
+            skipped.append({"view": index, "reason": reason})
+            continue
+        D = _depth_to_world(other)
+        head_from_depth = np.linalg.inv(anchor) @ D
+        P = backproject(np.nan_to_num(other.depth), other.K)
+        head = P @ head_from_depth[:3, :3].T + head_from_depth[:3, 3]
+        mask = _depth_mask(other, view["mask"])
+        mask &= np.linalg.norm(head, axis=-1) <= 0.16
+        valid = np.isfinite(other.depth) & (other.depth > 0.05) & (other.depth < 5)
+        if other.confidence is not None:
+            valid &= other.confidence >= 1
+        selected = P[valid & ndimage.binary_erosion(mask, iterations=2)]
+        T = np.linalg.inv(_depth_to_world(frame)) @ face_to_world @ head_from_depth
+        registered = selected @ T[:3, :3].T + T[:3, 3]
+        registered = registered[(registered - origin) @ up > 0]
+        if len(registered) < MIN_POINTS:
+            skipped.append({"view": index, "reason": f"only {len(registered)} valid head points"})
+            continue
+        sample = registered[::max(1, len(registered) // 4000)]
+        refinement = _refine_view(sample, points)
+        T = refinement @ T
+        registered = registered @ refinement[:3, :3].T + refinement[:3, 3]
+        points = np.vstack([points, registered])
+        accepted.append((other, mask, valid, T))
+    return points, accepted, skipped
+
+
+def _view_displacement(vertices, faces, frame, mask, valid, size, rmse):
+    import trimesh
+
+    h, w = frame.depth.shape
+    z = vertices[:, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        uv = vertices @ frame.K.T
+        uv = np.floor(uv[:, :2] / z[:, None])
+    inb = (np.isfinite(uv).all(1) & (z > 0) & (uv[:, 0] >= 0)
+           & (uv[:, 0] < w) & (uv[:, 1] >= 0) & (uv[:, 1] < h))
+    indices = np.flatnonzero(inb)
+    u, v = uv[inb].astype(int).T
+    zbuf = np.full((h, w), np.inf)
+    np.minimum.at(zbuf, (v, u), z[inb])
+    normals = trimesh.Trimesh(vertices, faces, process=False).vertex_normals
+    depth = frame.depth[v, u]
+    hit = ((z[inb] <= zbuf[v, u] + 0.02 * size)
+           & (np.einsum("ij,ij->i", normals[inb], -vertices[inb]) > 0)
+           & valid[v, u] & mask[v, u]
+           & (np.abs(depth - z[inb]) < max(4 * rmse, 0.005)))
+    seen = np.zeros(len(vertices), bool)
+    seen[indices[hit]] = True
+    disp = np.zeros_like(vertices)
+    disp[seen] = vertices[seen] * (depth[hit] / z[seen] - 1)[:, None]
+    return disp, seen
 
 
 def cut_bust(mesh, height):
@@ -300,7 +405,7 @@ def cut_bust(mesh, height):
     return cut
 
 
-def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=None):
+def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=None, views=None):
     import trimesh
     from scipy import ndimage, sparse
     from scipy.spatial import cKDTree
@@ -342,6 +447,10 @@ def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=N
     pts = pts[(pts - origin) @ up > (0 if face else 0.004)]
     if len(pts) < MIN_POINTS:
         raise FusionError(f"only {len(pts)} depth points above the {'cut' if face else 'floor'}")
+
+    extra, skipped = [], []
+    if face:
+        pts, extra, skipped = _face_views(frame, face_to_world, views, pts, origin, up)
 
     # gravity frame G: z up, floor/cut at z=0, x along the camera's horizontal right
     # (a portrait frame has the camera's x vertical; use its y then)
@@ -404,6 +513,17 @@ def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=N
     idx = np.flatnonzero(inb)[seen[inb]]
     disp[idx] = v_c[idx] / z[idx, None] * depth[v[idx], u[idx], None] - v_c[idx]
 
+    counts = seen.astype(int)
+    for other, other_mask, other_valid, T in extra:
+        inverse = np.linalg.inv(T)
+        vertices = v_c @ inverse[:3, :3].T + inverse[:3, 3]
+        correction, visible = _view_displacement(
+            vertices, mesh.faces, other, other_mask, other_valid, size, rmse)
+        disp += correction @ T[:3, :3].T
+        counts += visible
+    seen = counts > 0
+    disp /= np.maximum(counts, 1)[:, None]
+
     e = mesh.edges_unique
     n = len(v_c)
     A = sparse.coo_matrix((np.ones(2 * len(e)), (np.r_[e[:, 0], e[:, 1]], np.r_[e[:, 1], e[:, 0]])),
@@ -426,6 +546,8 @@ def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=N
         "seen_vertices": round(float(seen.mean()), 3),
     }
     if face:
+        report["views_used"] = 1 + len(extra)
+        report["views_skipped"] = skipped
         report["cut"] = "face anchor" if face_to_world is not None else "top - 24 cm"
     else:
         report["floor"] = ("camera gravity + plane" if floor is not None and frame.camera_to_world is not None

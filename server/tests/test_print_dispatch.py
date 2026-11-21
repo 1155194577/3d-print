@@ -135,6 +135,27 @@ def test_spec_preserves_source_bytes(tmp_path, body):
     assert Path(print_spec.unpack(spec, tmp_path)["src"]).read_bytes() == body
 
 
+def test_spec_relocates_extra_view_photos(tmp_path):
+    local = tmp_path / "local"
+    remote = tmp_path / "remote"
+    local.mkdir()
+    remote.mkdir()
+    source, extra = local / "photo.jpg", local / "view_1_photo.jpg"
+    source.write_bytes(b"front")
+    extra.write_bytes(b"side")
+    frame = Frame(np.ones((8, 8)), np.eye(3), camera_to_world=np.eye(4))
+    job = dict(src=str(source), workdir=str(local), frame=frame,
+               views=[dict(src=str(extra), frame=frame, face_to_world=np.eye(4))])
+    spec = print_spec.pack(job)
+    shutil.rmtree(local)
+    restored = print_spec.unpack(spec, remote)
+    view = restored["views"][0]
+    assert Path(view["src"]).read_bytes() == b"side"
+    assert Path(view["src"]).parent == remote
+    np.testing.assert_equal(view["frame"].depth, frame.depth)
+    np.testing.assert_equal(view["face_to_world"], np.eye(4))
+
+
 def test_queued_worker_error_and_expired_job(store):
     def broken(_):
         raise HTTPException(422, "bad shape")

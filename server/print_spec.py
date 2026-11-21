@@ -20,7 +20,9 @@ def pack(job):
     return {
         "files": files,
         "suffix": source.suffix,
-        "params": {key: value for key, value in job.items() if key not in ("src", "workdir", "frame")},
+        "params": {key: value for key, value in job.items()
+                   if key not in ("src", "workdir", "frame", "views")},
+        "views": [dict(view, src=Path(view["src"]).name) for view in job.get("views", [])],
         "frame": attributes,
     }
 
@@ -39,4 +41,5 @@ def unpack(spec, workdir):
             if isinstance(value, dict) and "data" in value:
                 value = np.frombuffer(value["data"], dtype=value["dtype"]).reshape(value["shape"]).copy()
             setattr(frame, key, value)
-    return dict(spec["params"], src=str(source), workdir=str(workdir), frame=frame)
+    views = [dict(view, src=str(Path(workdir) / view["src"])) for view in spec.get("views", [])]
+    return dict(spec["params"], src=str(source), workdir=str(workdir), frame=frame, views=views)

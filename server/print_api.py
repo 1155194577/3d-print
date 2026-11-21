@@ -222,6 +222,43 @@ def _parse_bed(fit_bed):
         raise HTTPException(400, "fit_bed wants WxDxH in mm, e.g. 220x220x250")
 
 
+def _face_anchor(value):
+    import numpy as np
+
+    if value is None:
+        return None
+    try:
+        vals = np.asarray(json.loads(value), dtype=float)
+        if vals.shape != (16,) or not np.isfinite(vals).all():
+            raise ValueError
+        return vals.reshape(4, 4).T
+    except (ValueError, TypeError):
+        raise ValueError("face_transform wants a JSON array of 16 finite floats")
+
+
+def _load_face_views(form, count, workdir):
+    views = []
+    for i in range(1, count):
+        prefix = f"view_{i}_"
+        get = lambda name: form.get(prefix + name)
+        try:
+            anchor = _face_anchor(get("face_transform"))
+            photo, depth = get("photo"), get("depth")
+            if photo is None or depth is None:
+                raise ValueError(f"{prefix}photo and {prefix}depth are required")
+            src = _save_upload(photo, PHOTO_EXTS, workdir, prefix + "photo")
+            dpath = _save_upload(depth, DEPTH_EXTS, workdir, prefix + "depth")
+            frame = depth_fusion.Frame.load(
+                dpath, int(get("depth_width")), int(get("depth_height")),
+                intrinsics=get("intrinsics"), camera_transform=get("camera_transform"),
+                image_orientation=int(get("image_orientation") or 1),
+                depth_intrinsics=get("depth_intrinsics"), depth_extrinsics=get("depth_extrinsics"))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, f"{prefix}: {exc}")
+        views.append(dict(src=src, frame=frame, face_to_world=anchor))
+    return views
+
+
 @router.post("/print/uploads")
 def print_upload_urls(payload: object = Body(...), authorization: str | None = Header(None)):
     _check_auth(authorization)
@@ -269,6 +306,15 @@ def print_stl(
         raise HTTPException(400, "send exactly one of `mesh` or `photo`")
     if mode == "face" and photo is None:
         raise HTTPException(400, "mode=face requires `photo`")
+    form = request._form
+    try:
+        view_count = int(form.get("view_count", "1"))
+        if not 1 <= view_count <= 5:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HTTPException(400, "view_count must be an integer between 1 and 5")
+    if view_count > 1 and (mode != "face" or depth is None):
+        raise HTTPException(400, "multiple views require mode=face and front depth")
     face_to_world = None
     if mode == "face" and face_transform is not None:
         import numpy as np
@@ -298,6 +344,7 @@ def print_stl(
     workdir = tempfile.mkdtemp(prefix="print_")
     try:
         frame = None
+        views = []
         gravity = None
         if mesh is not None:
             src = _save_upload(mesh, MESH_EXTS, workdir, "mesh")
@@ -310,6 +357,7 @@ def print_stl(
                     gravity = photo_level.photo_up(camera_transform, image_orientation or 1)
                 except ValueError as exc:
                     raise HTTPException(400, str(exc))
+            views = _load_face_views(form, view_count, workdir)
             if depth is not None:
                 dpath = _save_upload(depth, DEPTH_EXTS, workdir, "depth")
                 cpath = (_save_upload(depth_confidence, CONFIDENCE_EXTS, workdir, "confidence")
@@ -328,7 +376,8 @@ def print_stl(
     job = dict(src=src, is_mesh=mesh is not None, frame=frame, gravity=gravity, height=height, bed=bed,
                base_plate=base_plate, base_thickness=base_thickness,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
-               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation)
+               mode=mode, face_to_world=face_to_world, image_orientation=image_orientation,
+               views=views)
 
     try:
         if not submit_job(job_id, job, f"{name}.stl"):
@@ -478,7 +527,10 @@ def _make_stl(job, progress):
             try:
                 raw = trimesh.load(src, force="mesh")
                 if mode == "face":
-                    fused, fusion = depth_fusion.fuse_face(raw, frame, mask, job["face_to_world"])
+                    views = [dict(view, mask=reconstruct_photo.foreground_mask(view["src"]))
+                             for view in job.get("views", [])]
+                    fused, fusion = depth_fusion.fuse_face(
+                        raw, frame, mask, job["face_to_world"], views=views)
                 else:
                     fused, fusion = depth_fusion.fuse(raw, frame, mask)
                 src = os.path.join(job["workdir"], "fused.ply")
@@ -515,7 +567,8 @@ def _make_stl(job, progress):
 
     ex = report["extents"]
     return body, {
-        **({"mode": "face"} if mode == "face" else {}),
+        **({"mode": "face", "views_used": (fusion or {}).get("views_used", 1)}
+           if mode == "face" else {}),
         "extents_mm": [round(float(v), 1) for v in ex],
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),
@@ -570,6 +623,8 @@ def _line(state):
     elapsed = round(state["updated"] - state["created"], 1)
     if state["type"] == "done":
         return {"type": "done", "progress": 1.0, "filename": state["filename"],
+                **({"views_used": state["report"]["views_used"]}
+                   if "views_used" in state["report"] else {}),
                 "report": state["report"], "elapsed_s": elapsed}
     return {"type": "error", "status": state["status"], "detail": state["detail"],
             "elapsed_s": elapsed}

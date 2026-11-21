@@ -106,6 +106,22 @@ def test_bad_registration(s3_client, payload):
     assert client.post("/print/uploads", json=payload).status_code == 400
 
 
+def test_multiview_upload_names_and_defaults(s3_client):
+    s3, client = s3_client
+    names = {f"view_{i}_{part}": {"size": 4, "content_type": "application/octet-stream"}
+             for i in range(1, 5) for part in ("photo", "depth")}
+    response = client.post("/print/uploads", json={"files": names})
+    assert response.status_code == 200
+    registration = response.json()
+    for name in names:
+        suffix = ".jpg" if name.endswith("photo") else ".f32"
+        assert urlparse(registration["uploads"][name]["url"]).path.endswith(name + suffix)
+    # An allowed but absent signed view is a missing upload, not an unknown name.
+    response = client.post("/print", data={"job_id": registration["job_id"], "uploaded": "view_1_photo"})
+    assert response.status_code == 409
+    assert response.json()["missing"] == ["view_1_photo"]
+
+
 def test_missing_preserves_uploaded_parts_for_retry(s3_client):
     s3, client = s3_client
     files = {"photo": ("a.jpg", b"jpeg", "image/jpeg"), "depth": ("depth.f32", b"depth", "application/octet-stream")}
