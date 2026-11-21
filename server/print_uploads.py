@@ -19,6 +19,8 @@ from starlette.datastructures import FormData, Headers, UploadFile
 from server import print_jobs
 
 NAMES = {"photo", "mesh", "depth", "depth_confidence", "face_vertices"}
+SUFFIXES = {"image/jpeg": ".jpg", "model/vnd.usdz+zip": ".usdz", "model/vnd.pixar.usd": ".usdz",
+            "application/x-ply": ".ply", "model/ply": ".ply", "model/obj": ".obj", "text/plain": ".obj"}
 EXPIRES_IN = 900
 
 
@@ -74,7 +76,8 @@ def register(payload, limit):
         defaults = {"photo": ".jpg", "mesh": ".obj", "depth": ".f32",
                     "depth_confidence": ".u8", "face_vertices": ".f32"}
         suffix = (defaults[name] if content_type == "application/octet-stream" else
-                  ".jpg" if content_type == "image/jpeg" else mimetypes.guess_extension(content_type))
+                  SUFFIXES.get(content_type.split(";")[0].strip().lower())
+                  or mimetypes.guess_extension(content_type))
         filename = PurePosixPath((filename or name + (suffix or defaults[name])).replace("\\", "/")).name
         if filename in ("", ".", "..") or any(ord(char) < 32 for char in filename):
             raise HTTPException(400, f"{name}: invalid filename")

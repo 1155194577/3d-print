@@ -291,3 +291,14 @@ def test_unconfigured_s3_keeps_legacy_stream(s3_client, monkeypatch):
     assert base64.b64decode(done["stl_base64"]) == b"stl"
     assert done["filename"] == "a.stl" and done["progress"] == 1.0
     s3.assert_not_called()
+
+
+@pytest.mark.parametrize("content_type,suffix", [
+    ("model/vnd.usdz+zip", ".usdz"), ("application/x-ply", ".ply"), ("model/obj", ".obj"),
+    ("application/octet-stream", ".obj")])
+def test_mesh_key_suffix_follows_content_type(s3_client, content_type, suffix):
+    _, client = s3_client
+    response = client.post("/print/uploads", json={"files": {"mesh": {"size": 10, "content_type": content_type}}})
+    assert response.status_code == 200, response.text
+    path = unquote(urlparse(response.json()["uploads"]["mesh"]["url"]).path)
+    assert path.endswith("/mesh/mesh" + suffix)
