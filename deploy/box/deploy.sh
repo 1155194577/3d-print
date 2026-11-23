@@ -19,11 +19,12 @@ if [ ! -x "/opt/$SLICER/bin/prusa-slicer" ]; then
     apt-get update -qq
     apt-get install -y -qq bzip2 libgl1 libglu1-mesa libegl1 libopengl0 libwayland-egl1 \
         "$(apt-cache show libgtk-3-0t64 >/dev/null 2>&1 && echo libgtk-3-0t64 || echo libgtk-3-0)"
-    curl -fsSL -o /tmp/prusa-slicer.tar.bz2 \
+    archive_dir=$(mktemp -d)
+    curl -fsSL -o "$archive_dir/prusa-slicer.tar.bz2" \
         "https://github.com/prusa3d/PrusaSlicer/releases/download/version_2.7.4/${SLICER/+/%2B}.tar.bz2"
-    echo "$SLICER_SHA256  /tmp/prusa-slicer.tar.bz2" | sha256sum -c --quiet
-    tar xjf /tmp/prusa-slicer.tar.bz2 -C /opt
-    rm /tmp/prusa-slicer.tar.bz2
+    echo "$SLICER_SHA256  $archive_dir/prusa-slicer.tar.bz2" | sha256sum -c --quiet
+    tar xjf "$archive_dir/prusa-slicer.tar.bz2" -C /opt
+    rm -r "$archive_dir"
 fi
 ln -sf "/opt/$SLICER/bin/prusa-slicer" /usr/local/bin/prusa-slicer
 prusa-slicer --help >/dev/null
