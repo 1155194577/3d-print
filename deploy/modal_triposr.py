@@ -61,7 +61,8 @@ def _png(mask):
     return buf.getvalue()
 
 
-@app.cls(gpu="L4", timeout=600, scaledown_window=300)
+# L40S is the same arch (8.9) as L4, so it reuses the torchmcubes build when L4s run out.
+@app.cls(gpu=["L4", "L40S"], timeout=600, scaledown_window=300)
 class TripoSR:
     @modal.enter()
     def load(self):
