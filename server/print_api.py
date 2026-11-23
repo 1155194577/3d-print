@@ -591,7 +591,7 @@ def _make_stl(job, progress):
                     camera = model_check.nominal_camera(reference.width)
                     review_views = []
                 review = model_check.check(reference, trimesh.load(src, force="mesh"), camera,
-                                           views=review_views, can_retake=frame is not None)
+                                           views=review_views, can_retake="front" in cameras and frame.camera_to_world is not None)
             except Exception:
                 review = {"skipped": "Model review unavailable; the print was not blocked."}
     progress("repair")
