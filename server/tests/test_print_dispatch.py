@@ -19,6 +19,17 @@ from server import print_jobs, print_spec
 from depth_fusion import Frame
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_spec_preserves_optimise(tmp_path, enabled):
+    source = tmp_path / "mesh.stl"
+    source.write_bytes(b"mesh")
+    job = dict(src=str(source), workdir=str(tmp_path), frame=None, optimise=enabled)
+    spec = print_spec.pack(job)
+    target = tmp_path / "unpacked"
+    target.mkdir()
+    assert print_spec.unpack(spec, target)["optimise"] is enabled
+
+
 @pytest.fixture
 def store(monkeypatch):
     value = print_jobs.MemoryStore()
