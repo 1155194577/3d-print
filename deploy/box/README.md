@@ -2,7 +2,8 @@
 
 `/print`, `/print/uploads`, `/photo-check` and `/api/health` run here: auth, uploads and
 S3 signing, job state and NDJSON streams, the SiliconFlow photo check, depth fusion,
-repair, printability and the STL upload to S3. Only TripoSR + rembg inference runs on
+repair, printability, the STL upload to S3 and slicing every STL into G-code for the CUHK
+MakerSpace Creality K1C (PrusaSlicer CLI, installed by `deploy.sh` under `/opt`). Only TripoSR + rembg inference runs on
 Modal (`deploy/modal_triposr.py`), called through `server/remote_triposr.py`
 (`TRIPOSR_BACKEND=modal`).
 

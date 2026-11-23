@@ -35,7 +35,7 @@ import img2mesh  # noqa: E402
 import photo_level  # noqa: E402
 import printability  # noqa: E402
 
-from server import print_jobs, print_uploads  # noqa: E402
+from server import print_gcode, print_jobs, print_uploads  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +382,7 @@ def print_stl(
                base_plate=base_plate, base_thickness=base_thickness,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
                mode=mode, face_to_world=face_to_world, image_orientation=image_orientation,
-               views=views)
+               views=views, name=name)
 
     try:
         if not submit_job(job_id, job, f"{name}.stl"):
@@ -409,7 +409,11 @@ def _job_response(job_id, accept):
 
 
 def execute_job(job, progress):
-    return _make_stl(job, progress)
+    body, report = _make_stl(job, progress)
+    progress("slice")
+    gcode, report["gcode"] = print_gcode.slice_stl(body, report["extents_mm"],
+                                                   f"{job.get('name', 'model')}.gcode")
+    return body, report, gcode
 
 
 def submit_job(job_id, job, filename):
@@ -429,7 +433,7 @@ def _stl_response(body, summary, filename, result=None):
         "X-Print-Report": json.dumps(summary, ensure_ascii=True),
         "Access-Control-Expose-Headers": "X-Print-Report, Content-Disposition",
     }
-    if result:
+    if result and "stl_url" in result:
         headers.update({"X-STL-URL": result["stl_url"], "X-STL-File-ID": result["stl_file_id"],
                         "X-STL-Expires-In": str(result["stl_expires_in"])})
         headers["Access-Control-Expose-Headers"] += ", X-STL-URL, X-STL-File-ID, X-STL-Expires-In"
@@ -486,6 +490,25 @@ async def print_result(job_id: str):
                          await run_in_threadpool(print_uploads.result_fields, state))
 
 
+@router.get("/print/{job_id}/gcode", response_class=Response,
+            responses={200: {"content": {"text/x-gcode": {}}}})
+async def print_gcode_result(job_id: str):
+    """Held open until the job ends: K1C PLA G-code, or why there is none as {"detail"}."""
+    job_id, state = await run_in_threadpool(_job_state, job_id)
+    while state["type"] == "progress":
+        await asyncio.sleep(POLL_S)
+        job_id, state = await run_in_threadpool(_job_state, job_id)
+    if state["type"] == "error":
+        return JSONResponse({"detail": state["detail"]}, status_code=state["status"])
+    info = state["report"].get("gcode") or {}
+    if not state.get("gcode_chunks"):
+        return JSONResponse({"detail": "no G-code for this print: " + info.get("skipped", "not sliced")},
+                            status_code=404)
+    body = await run_in_threadpool(print_jobs.get_gcode, job_id)
+    return Response(body, media_type="text/x-gcode", headers={
+        "Content-Disposition": f'attachment; filename="{info.get("filename", "model.gcode")}"'})
+
+
 # stage -> (progress when it starts, message); the order is the order they run in
 STAGES = {
     "queued": (0.01, "Waiting for a print server GPU"),
@@ -496,7 +519,8 @@ STAGES = {
     "fuse": (0.60, "Fitting to the LiDAR depth"),
     "repair": (0.75, "Repairing and adding the base"),
     "export": (0.88, "Writing the STL"),
-    "check": (0.94, "Checking it will print"),
+    "check": (0.92, "Checking it will print"),
+    "slice": (0.95, "Slicing G-code for the MakerSpace K1C"),
 }
 HEARTBEAT_S = 2.0
 

@@ -169,16 +169,20 @@ def preview(job_id):
 
 
 def result_fields(state):
-    key = state.get("stl_file_id")
-    if not key:
-        return {}
-    try:
-        url = client().generate_presigned_url("get_object", Params={
-            "Bucket": bucket(), "Key": key}, ExpiresIn=3600)
-        return dict(stl_url=url, stl_file_id=key, stl_expires_in=3600)
-    except Exception as exc:
-        logging.getLogger(__name__).warning("could not sign STL result error=%s", type(exc).__name__)
-        return {}
+    """Signed downloads of the job's results in storage: `stl_url`, and `gcode_url` once sliced."""
+    fields = {}
+    for kind in ("stl", "gcode"):
+        key = state.get(f"{kind}_file_id")
+        if not key:
+            continue
+        try:
+            url = client().generate_presigned_url("get_object", Params={
+                "Bucket": bucket(), "Key": key}, ExpiresIn=3600)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("could not sign %s result error=%s", kind, type(exc).__name__)
+            continue
+        fields.update({f"{kind}_url": url, f"{kind}_file_id": key, f"{kind}_expires_in": 3600})
+    return fields
 
 
 def configure_lifecycle():
