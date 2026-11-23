@@ -26,6 +26,7 @@ modal deploy deploy/modal_app.py               # serverless GPU, see that file
 | `up_axis` | `y` \| `z` | `y` | Up axis of an OBJ/PLY/GLB/STL mesh (ARKit exports Y-up). USDZ uses its own. |
 | `fit_bed` | `WxDxH` mm | | Shrink, only if needed, to fit this printer bed, e.g. `220x220x250`. |
 | `base_plate` | bool | `true` | Fuse a 3 mm plate underneath (adds 2.5 mm of height and a margin around). |
+| `model_check` | bool | `false` | Advisory render-versus-photo review for object-mode photo prints; ignored for meshes and face mode. |
 
 Header `Authorization: Bearer <token>` is required when the server has `PRINT_API_TOKEN` set (the Modal deploy does).
 
@@ -57,6 +58,43 @@ plus a RANSAC plane), align the mesh by trimmed similarity ICP from 8 yaw starts
 seen vertices onto the depth surface and fade that into the hidden side, then the usual
 flatten / repair / base plate. Too few depth points on the object (< 200) falls back to the
 photo + `height_mm` path, reported as `"fusion": {"skipped": "..."}`.
+
+Object mode also accepts `view_count` (1–5, including the primary) and extra frames
+`view_i_photo`, `view_i_depth`, `view_i_depth_width`, `view_i_depth_height`,
+`view_i_intrinsics`, `view_i_camera_transform`, `view_i_image_orientation`, optional
+`view_i_depth_intrinsics`, `view_i_depth_extrinsics`, and `view_i_side` (a descriptive
+side string), with indexes starting at 1. The primary must have depth; otherwise
+the request returns 400. Keep the object stationary and retain the same ARKit session:
+registration uses camera-to-world poses, not face anchors. Missing poses or sparse
+extra depth are skipped and listed in `fusion.views_skipped`; `fusion.views_used`
+includes the primary. Extra `photo`/`depth` files work with both multipart and the
+S3 `uploaded=` mechanism, with calibration/side fields still sent in the form.
+
+### Model check
+
+Opt in with `model_check=true`. After depth fusion (if present), before print repair,
+the box renders front/left/back/right with a CPU perspective z-buffer renderer and
+sends one labelled photo/render grid to SiliconFlow. Photo-only review uses the saved
+upright, foreground-cropped/padded TripoSR input and a **nominal**, not calibrated,
+1.9-distance, 40° vertical-FOV camera. Fused review uses the photo calibration and
+the fusion gravity frame; accepted extra views also get their own photo/camera comparisons.
+Hidden-side verdicts are plausibility checks, not observations of unseen geometry.
+
+The `X-Print-Report` JSON and NDJSON `done.report` include:
+
+```json
+{"model_check":{"ok":false,"sides":[{"side":"back","ok":false,"message":"The back may have missing or distorted parts. Take another photo of the back."}],"retake_side":"back","suggest_scan":false,"model":"deepseek-ai/DeepSeek-V4.1-Flash","answers":{"front":"yes","left":"yes","back":"no","right":"yes"}}}
+```
+
+`sides` contains all four sides, plus `view_1` etc. for accepted extra views.
+The first bad hidden side can be retaken when primary depth exists. Without depth,
+or when a model still fails after extra views were fused, `suggest_scan=true` and
+the message recommends a walk-around Object Scan; `retake_side` is null. If review
+fails (including unavailable VLM/key), `model_check` contains only `skipped` with a
+user-safe reason. Review never blocks printing. With review disabled the key is absent.
+Rendering and VLM requests stay on the box with `TRIPOSR_BACKEND=modal`; deploy the
+updated `deploy/modal_triposr.py` too so it can return the preprocessed input PNG.
+No OpenGL or new rendering dependencies are needed.
 
 Object-mode photo meshes that were not depth-fused are leveled before scaling and adding the
 plate. Without a camera transform, area-weighted face normals are clustered
@@ -164,7 +202,7 @@ flushed as it goes:
 {"type":"done","progress":1.0,"filename":"mug.stl","report":{...X-Print-Report...},"stl_base64":"...","elapsed_s":41.8}
 ```
 
-- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`, `check`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
+- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `review` (opt-in object photos only), `repair`, `export`, `check`. A mesh goes straight from `received` to `repair`. Heartbeats can repeat a stage.
 - The current stage repeats about every 2 s as a heartbeat, including during slow job-store reads. Its `progress` creeps toward the next stage's start and never reaches it. On Modal an always-warm CPU frontend accepts and validates uploads without waiting for a GPU, then dispatches each print to an L4 function. The GPU container retains TripoSR between jobs; its GIL cannot block the frontend. Local/dev uses an in-process runner.
 - Modal jobs start at `queued` ("Waiting for a print server GPU"). They can wait up to 10 minutes for scheduling before becoming an error; the normal 90-second worker-staleness rule applies only after execution starts. Both streamed and synchronous requests use the same shared job state and retry/join semantics.
 - The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either means the connection dropped, not that the print failed: resume it.

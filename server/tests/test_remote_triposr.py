@@ -68,3 +68,21 @@ def test_unread_masks_are_bounded(tmp_path):
         photo.write_bytes(b"jpeg")
         remote(str(photo), str(tmp_path / "raw.obj"))
     assert len(remote._masks) == remote_triposr.MASK_CACHE
+
+
+def test_remote_returns_preprocessed_input_for_box_review(tmp_path):
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"jpeg")
+    png = _png(np.full((32, 32), 128, np.uint8))
+
+    def reconstruct(*args, **kwargs):
+        assert kwargs["with_input"]
+        yield "result", {"mesh": b"o mesh\n", "input": png}
+
+    service = FakeService(np.zeros((2, 2), np.uint8))
+    service.reconstruct = FakeMethod(reconstruct)
+    remote = ModalReconstructor()
+    remote._remote = service
+    destination = tmp_path / "input.png"
+    remote(str(photo), str(tmp_path / "raw.obj"), input_path=str(destination))
+    assert destination.read_bytes() == png

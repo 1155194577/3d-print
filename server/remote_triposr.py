@@ -28,14 +28,15 @@ class ModalReconstructor:
         return self._remote
 
     def __call__(self, image_path, out_path, mc_resolution=256, foreground_ratio=0.85,
-                 quarter_turns=None, progress=None):
+                 quarter_turns=None, progress=None, input_path=None):
         progress = progress or (lambda *a: None)
         with open(image_path, "rb") as fh:
             image = fh.read()
         result = None
         for kind, value in self._service().reconstruct.remote_gen(
                 image, os.path.splitext(image_path)[1], mc_resolution=mc_resolution,
-                foreground_ratio=foreground_ratio, quarter_turns=quarter_turns, with_mask=True):
+                foreground_ratio=foreground_ratio, quarter_turns=quarter_turns, with_mask=True,
+                **({"with_input": True} if input_path is not None else {})):
             if kind == "stage":
                 progress(value)
             elif kind == "result":
@@ -44,6 +45,9 @@ class ModalReconstructor:
             raise RuntimeError("TripoSR on Modal returned no mesh")
         with open(out_path, "wb") as fh:
             fh.write(result["mesh"])
+        if input_path is not None and result.get("input") is not None:
+            with open(input_path, "wb") as fh:
+                fh.write(result["input"])
         if result.get("mask") is not None:
             with self._lock:
                 self._masks[os.path.abspath(image_path)] = result["mask"]

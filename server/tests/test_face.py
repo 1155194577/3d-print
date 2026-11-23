@@ -146,7 +146,9 @@ def test_multiview_request_validation(client, monkeypatch):
     assert report["views_used"] == 1
     assert "missing" in report["fusion"]["views_skipped"][0]["reason"]
     fields["mode"] = "object"
-    assert client.post("/print", data=fields, files=files).status_code == 400
+    _, report = result(client.post("/print", data=fields, files=files))
+    assert report["fusion"]["views_used"] == 1
+    assert "camera_transform" in report["fusion"]["views_skipped"][0]["reason"]
 
 
 @pytest.mark.parametrize("anchor", [False, True])

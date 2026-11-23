@@ -272,13 +272,13 @@ def _icp(points, target_tree, target, init, iters=40, keep=0.85):
     return s, R, t, float(np.sqrt((d ** 2).mean()) / s)
 
 
-def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000):
+def fuse(mesh, frame, mask, yaw_starts=8, max_points=4000, views=None, cameras=None):
     """Align a TripoSR `mesh` (z up, arbitrary scale) to the frame's depth.
 
     `mask` is the photo's foreground (any resolution; resized to the depth map).
     Returns (mesh in metres with z up and the floor at z=0, report dict).
     """
-    return _fuse(mesh, frame, mask, yaw_starts, max_points)
+    return _fuse(mesh, frame, mask, yaw_starts, max_points, views=views, cameras=cameras)
 
 
 def fuse_face(mesh, frame, mask, face_to_world=None, views=None):
@@ -326,34 +326,35 @@ def _refine_view(points, target):
     return transform
 
 
-def _face_views(frame, face_to_world, views, points, origin, up):
+def _face_views(frame, face_to_world, views, points, origin, up, face=True):
     from scipy import ndimage
 
     accepted, skipped = [], []
     for index, view in enumerate(views or [], 1):
         other, anchor = view.get("frame"), view.get("face_to_world")
         reason = view.get("skipped")
-        if not reason and (face_to_world is None or frame.camera_to_world is None
-                           or anchor is None or other.camera_to_world is None):
-            reason = "missing face_transform or camera_transform"
+        if not reason and (frame.camera_to_world is None or other.camera_to_world is None
+                           or (face and (face_to_world is None or anchor is None))):
+            reason = "missing face_transform or camera_transform" if face else "missing camera_transform"
         if reason:
             skipped.append({"view": index, "reason": reason})
             continue
         D = _depth_to_world(other)
-        head_from_depth = np.linalg.inv(anchor) @ D
+        head_from_depth = np.linalg.inv(anchor) @ D if face else D
         P = backproject(np.nan_to_num(other.depth), other.K)
         head = P @ head_from_depth[:3, :3].T + head_from_depth[:3, 3]
         mask = _depth_mask(other, view["mask"])
-        mask &= np.linalg.norm(head, axis=-1) <= 0.16
+        if face:
+            mask &= np.linalg.norm(head, axis=-1) <= 0.16
         valid = np.isfinite(other.depth) & (other.depth > 0.05) & (other.depth < 5)
         if other.confidence is not None:
             valid &= other.confidence >= 1
         selected = P[valid & ndimage.binary_erosion(mask, iterations=2)]
-        T = np.linalg.inv(_depth_to_world(frame)) @ face_to_world @ head_from_depth
+        T = np.linalg.inv(_depth_to_world(frame)) @ (face_to_world @ head_from_depth if face else D)
         registered = selected @ T[:3, :3].T + T[:3, 3]
         registered = registered[(registered - origin) @ up > 0]
         if len(registered) < MIN_POINTS:
-            skipped.append({"view": index, "reason": f"only {len(registered)} valid head points"})
+            skipped.append({"view": index, "reason": f"only {len(registered)} valid {'head' if face else 'object'} points"})
             continue
         sample = registered[::max(1, len(registered) // 4000)]
         refinement = _refine_view(sample, points)
@@ -405,7 +406,8 @@ def cut_bust(mesh, height):
     return cut
 
 
-def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=None, views=None):
+def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=None, views=None,
+          cameras=None):
     import trimesh
     from scipy import ndimage, sparse
     from scipy.spatial import cKDTree
@@ -449,8 +451,8 @@ def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=N
         raise FusionError(f"only {len(pts)} depth points above the {'cut' if face else 'floor'}")
 
     extra, skipped = [], []
-    if face:
-        pts, extra, skipped = _face_views(frame, face_to_world, views, pts, origin, up)
+    if face or views:
+        pts, extra, skipped = _face_views(frame, face_to_world, views, pts, origin, up, face=face)
 
     # gravity frame G: z up, floor/cut at z=0, x along the camera's horizontal right
     # (a portrait frame has the camera's x vertical; use its y then)
@@ -536,6 +538,15 @@ def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=N
     for _ in range(15):  # fade the correction into the hidden side
         disp[~seen] = 0.85 * (W @ disp)[~seen]
     fused = trimesh.Trimesh(to_g(v_c + disp), mesh.faces, process=False)
+    if cameras is not None:
+        cameras["front"] = photo_camera(frame, RG, origin)
+        accepted = iter(extra)
+        rejected = {entry["view"] for entry in skipped}
+        for index, view in enumerate(views or [], 1):
+            if index not in rejected:
+                other, _, _, T = next(accepted)
+                inverse = np.linalg.inv(T)
+                cameras[f"view_{index}"] = photo_camera(other, RG, origin, inverse)
     if face:
         fused = cut_bust(fused, 0)
 
@@ -545,11 +556,27 @@ def _fuse(mesh, frame, mask, yaw_starts, max_points, face=False, face_to_world=N
         "scale": round(float(1 / s), 5),
         "seen_vertices": round(float(seen.mean()), 3),
     }
-    if face:
+    if face or views:
         report["views_used"] = 1 + len(extra)
         report["views_skipped"] = skipped
+    if face:
         report["cut"] = "face anchor" if face_to_world is not None else "top - 24 cm"
     else:
         report["floor"] = ("camera gravity + plane" if floor is not None and frame.camera_to_world is not None
                            else "plane" if floor is not None else "lowest point")
     return fused, report
+
+
+def photo_camera(frame, gravity_rotation, origin, primary_to_view=None):
+    """Photo K,R,t in the fused gravity frame; calibration stays out of JSON reports."""
+    transform = np.eye(4)
+    transform[:3, :3] = gravity_rotation.T
+    transform[:3, 3] = origin
+    if primary_to_view is not None:
+        transform = primary_to_view @ transform
+    transform = getattr(frame, "depth_to_photo", np.eye(4)) @ transform
+    K = getattr(frame, "photo_K", None)
+    if K is None:
+        pw, ph = frame.photo_size or (frame.depth.shape[1], frame.depth.shape[0])
+        K = np.diag([pw / frame.depth.shape[1], ph / frame.depth.shape[0], 1.]) @ frame.K
+    return K, transform[:3, :3], transform[:3, 3]

@@ -75,7 +75,7 @@ class TripoSR:
 
     @modal.method()
     def reconstruct(self, image, suffix, mc_resolution=256, foreground_ratio=0.85,
-                    quarter_turns=None, with_mask=False):
+                    quarter_turns=None, with_mask=False, with_input=False):
         """Yields ("stage", name) as it goes, then ("result", {"mesh": obj bytes, "mask": png|None})."""
         import queue
         import tempfile
@@ -84,13 +84,16 @@ class TripoSR:
         events = queue.Queue()
         with tempfile.TemporaryDirectory() as directory:
             src, out = _write(directory, image, suffix), str(Path(directory) / "raw.obj")
+            input_path = str(Path(directory) / "input.png") if with_input else None
 
             def work():
                 try:
                     self.model(src, out, mc_resolution=mc_resolution, foreground_ratio=foreground_ratio,
-                               quarter_turns=quarter_turns, progress=lambda s: events.put(("stage", s)))
+                               quarter_turns=quarter_turns, progress=lambda s: events.put(("stage", s)),
+                               input_path=input_path)
                     mask = _png(self.model.foreground_mask(src)) if with_mask else None
-                    events.put(("result", {"mesh": Path(out).read_bytes(), "mask": mask}))
+                    events.put(("result", {"mesh": Path(out).read_bytes(), "mask": mask,
+                                           "input": Path(input_path).read_bytes() if input_path else None}))
                 except BaseException as exc:
                     events.put(("error", exc))
 
