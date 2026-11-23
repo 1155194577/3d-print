@@ -138,4 +138,6 @@ def test_uploaded_gcode_is_served_from_storage_not_memory(monkeypatch, tmp_path)
 
 def print_uploads_url(resp):
     assert "results/" in resp.headers["location"] and "model.gcode" in resp.headers["location"]
+    assert "response-content-disposition=attachment" in resp.headers["location"]
+    assert "cube.gcode" in resp.headers["location"]
     return resp.headers["location"]

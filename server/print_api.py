@@ -18,7 +18,6 @@ import sys
 import tempfile
 import threading
 import time
-from urllib.parse import quote
 import uuid
 
 from fastapi import APIRouter, Body, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -508,11 +507,9 @@ async def print_gcode_result(job_id: str):
             return RedirectResponse(signed["gcode_url"], status_code=307)
         return JSONResponse({"detail": "no G-code for this print: " + info.get("skipped", "not sliced")},
                             status_code=404)
-    name = info.get("filename", "model.gcode")
-    ascii_name = name.encode("ascii", "replace").decode().replace("?", "_").replace('"', "_")
     body = await run_in_threadpool(print_jobs.get_gcode, job_id)
     return Response(body, media_type="text/x-gcode", headers={
-        "Content-Disposition": f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(name)}'})
+        "Content-Disposition": print_uploads.attachment(info.get("filename", "model.gcode"))})
 
 
 # stage -> (progress when it starts, message); the order is the order they run in
