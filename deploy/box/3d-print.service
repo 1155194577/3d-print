@@ -8,9 +8,8 @@ WorkingDirectory=/opt/3d-print/app
 EnvironmentFile=/etc/3d-print/env
 Environment=TRIPOSR_BACKEND=modal PYTHONUNBUFFERED=1 PYTHONWARNINGS=ignore
 ExecStart=/opt/3d-print/venv/bin/uvicorn --factory server.print_api:create_print_app --host 127.0.0.1 --port 8000 --timeout-keep-alive 75
-MemoryHigh=600M
-MemoryMax=750M
-MemorySwapMax=1G
+MemoryMax=650M
+MemorySwapMax=0
 Restart=always
 RestartSec=3
 
