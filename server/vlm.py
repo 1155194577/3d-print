@@ -49,26 +49,27 @@ def parse_answers(content: str, questions: dict[str, str]) -> dict[str, str]:
 
 
 class SiliconFlowVLM:
-    def __call__(self, jpeg: bytes, questions: dict[str, str]) -> dict[str, str]:
+    def __call__(self, jpeg: bytes, questions: dict[str, str], *, system_prompt=None) -> dict[str, str]:
         key = os.environ.get("SILICONFLOW_API_KEY")
         if not key:
             raise ValueError("SILICONFLOW_API_KEY is not configured")
         encoded = io.BytesIO()
         load_image(jpeg).save(encoded, "JPEG", quality=85)
         url = "data:image/jpeg;base64," + base64.b64encode(encoded.getvalue()).decode("ascii")
-        prompt = (
+        prompt = ("Answer each question using its exact JSON key.\n" + json.dumps(questions)
+                  if system_prompt is not None else (
             "Assess this photo for reconstruction. Answer each question using its exact "
             "JSON key. Important: cut_off asks whether the object IS fully inside the "
             "frame, so answer yes when fully framed and no when cropped.\n"
             + json.dumps(questions)
-        )
+        ))
         try:
             response = httpx.post(
                 API_URL,
                 headers={"Authorization": f"Bearer {key}"},
                 json={"model": VLM_MODEL, "temperature": 0, "max_tokens": 2048,
                       "messages": [
-                          {"role": "system", "content": SYSTEM_PROMPT},
+                          {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
                           {"role": "user", "content": [
                               {"type": "image_url", "image_url": {"url": url}},
                               {"type": "text", "text": prompt},
