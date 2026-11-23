@@ -7,6 +7,7 @@ import os
 from pathlib import PurePosixPath
 import tempfile
 import time
+from urllib.parse import quote
 import uuid
 
 import boto3
@@ -168,17 +169,30 @@ def preview(job_id):
     return dict(job_id=job_id, files=files)
 
 
+def attachment(name):
+    """Content-Disposition for a download named `name`, with an ASCII fallback (RFC 6266)."""
+    fallback = name.encode("ascii", "replace").decode().replace("?", "_").replace('"', "_")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
+
+
 def result_fields(state):
-    key = state.get("stl_file_id")
-    if not key:
-        return {}
-    try:
-        url = client().generate_presigned_url("get_object", Params={
-            "Bucket": bucket(), "Key": key}, ExpiresIn=3600)
-        return dict(stl_url=url, stl_file_id=key, stl_expires_in=3600)
-    except Exception as exc:
-        logging.getLogger(__name__).warning("could not sign STL result error=%s", type(exc).__name__)
-        return {}
+    """Signed downloads of the job's results in storage: `stl_url`, and `gcode_url` once sliced."""
+    fields = {}
+    for kind in ("stl", "gcode"):
+        key = state.get(f"{kind}_file_id")
+        if not key:
+            continue
+        try:
+            params = {"Bucket": bucket(), "Key": key}
+            if kind == "gcode":
+                params["ResponseContentDisposition"] = attachment(
+                    (state.get("report", {}).get("gcode") or {}).get("filename", "model.gcode"))
+            url = client().generate_presigned_url("get_object", Params=params, ExpiresIn=3600)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("could not sign %s result error=%s", kind, type(exc).__name__)
+            continue
+        fields.update({f"{kind}_url": url, f"{kind}_file_id": key, f"{kind}_expires_in": 3600})
+    return fields
 
 
 def configure_lifecycle():

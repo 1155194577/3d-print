@@ -2,7 +2,8 @@
 
 A job's state lives in a key-value store that every container can read (a modal.Dict on Modal,
 memory locally), so the app can drop the POST, come back later and pick the job up from any
-container. Keys: `<id>` holds the state dict, `<id>:stl:<n>` the finished STL in chunks.
+container. Keys: `<id>` holds the state dict, `<id>:stl:<n>` the finished STL in chunks and
+`<id>:gcode:<n>` its K1C G-code, when it was sliced.
 """
 
 import logging
@@ -38,8 +39,9 @@ class MemoryStore:
                    if isinstance(v, dict) and now - v["created"] > TTL_S}
             for k, v in old.items():
                 self._d.pop(k, None)
-                for i in range(v.get("stl_chunks", 0)):
-                    self._d.pop(f"{k}:stl:{i}", None)
+                for kind in ("stl", "gcode"):
+                    for i in range(v.get(f"{kind}_chunks", 0)):
+                        self._d.pop(f"{k}:{kind}:{i}", None)
 
 
 class ModalDictStore:
@@ -114,24 +116,29 @@ def run_existing(job_id, run):
         try:
             if state["stage"] == "queued":
                 save(stage="received", since=time.time(), history=state["history"] + ["received"])
-            body, report = run(lambda stage: save(stage=stage, since=time.time(),
-                                                  history=state["history"] + [stage]))
+            body, report, *rest = run(lambda stage: save(stage=stage, since=time.time(),
+                                                         history=state["history"] + [stage]))
+            gcode = rest[0] if rest else None
             result = {}
             if os.environ.get("PRINT_S3_BUCKET"):
                 from server import print_uploads
 
-                key = f"results/{job_id}/model.stl"
-                try:
-                    print_uploads.client().put_object(Bucket=print_uploads.bucket(), Key=key,
-                                                      Body=body, ContentType="model/stl")
-                    result["stl_file_id"] = key
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("could not upload STL result job_id=%s error=%s",
-                                                       job_id, type(exc).__name__)
-            chunks = [body[i:i + CHUNK] for i in range(0, len(body), CHUNK)] or [b""]
-            for i, chunk in enumerate(chunks):
-                store.put(f"{job_id}:stl:{i}", chunk)
-            save(type="done", report=report, stl_chunks=len(chunks), **result)
+                for kind, label, data, media in (("stl", "STL", body, "model/stl"),
+                                                 ("gcode", "G-code", gcode, "text/x-gcode")):
+                    if data is None:
+                        continue
+                    key = f"results/{job_id}/model.{kind}"
+                    try:
+                        print_uploads.client().put_object(Bucket=print_uploads.bucket(), Key=key,
+                                                          Body=data, ContentType=media)
+                        result[f"{kind}_file_id"] = key
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning("could not upload %s result job_id=%s error=%s",
+                                                           label, job_id, type(exc).__name__)
+            result["stl_chunks"] = _put_chunks(f"{job_id}:stl", body)
+            if gcode is not None and "gcode_file_id" not in result:  # served from storage when uploaded
+                result["gcode_chunks"] = _put_chunks(f"{job_id}:gcode", gcode)
+            save(type="done", report=report, **result)
         except HTTPException as exc:
             save(type="error", status=exc.status_code, detail=exc.detail)
         except Exception as exc:  # a bug, not the client's fault
@@ -158,6 +165,21 @@ def start(job_id, run, filename):
     return True
 
 
+def _put_chunks(prefix, data):
+    chunks = [data[i:i + CHUNK] for i in range(0, len(data), CHUNK)] or [b""]
+    for i, chunk in enumerate(chunks):
+        store.put(f"{prefix}:{i}", chunk)
+    return len(chunks)
+
+
+def _get_chunks(job_id, kind):
+    n = store.get(job_id)[f"{kind}_chunks"]
+    return b"".join(store.get(f"{job_id}:{kind}:{i}") for i in range(n))
+
+
 def get_stl(job_id):
-    n = store.get(job_id)["stl_chunks"]
-    return b"".join(store.get(f"{job_id}:stl:{i}") for i in range(n))
+    return _get_chunks(job_id, "stl")
+
+
+def get_gcode(job_id):
+    return _get_chunks(job_id, "gcode")

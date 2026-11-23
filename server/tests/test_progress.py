@@ -49,7 +49,7 @@ def test_photo_streams_stages_heartbeats_and_stl(client, monkeypatch):
     stages = [p["stage"] for p in progress]
     assert all(p["type"] == "progress" and 0 <= p["progress"] < 1 and p["message"] for p in progress)
     assert [s for i, s in enumerate(stages) if i == 0 or s != stages[i - 1]] == [
-        "received", "background", "reconstruct", "mesh", "repair", "export", "check"]
+        "received", "background", "reconstruct", "mesh", "repair", "export", "check", "slice"]
     assert stages.count("reconstruct") > 1  # heartbeats repeat the stage
     values = [p["progress"] for p in progress]
     assert values == sorted(values)
