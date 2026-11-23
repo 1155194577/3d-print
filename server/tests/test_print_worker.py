@@ -109,7 +109,7 @@ def test_completed_job_heartbeats_repeat_last_replayed_stage(monkeypatch):
     progress = [event for event in events if event["type"] == "progress"]
     values = [event["progress"] for event in progress]
     assert values == sorted(values)
-    assert all(event["stage"] == "check" for event in progress[len(api.STAGES):])
+    assert all(event["stage"] == list(api.STAGES)[-1] for event in progress[len(api.STAGES):])
     assert all(event["elapsed_s"] >= 30 for event in progress)
     assert events[-1]["type"] == "done"
 

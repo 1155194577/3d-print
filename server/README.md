@@ -138,6 +138,17 @@ are not accepted in face mode. `X-Print-Report` includes `"mode": "face"`.
   Warnings (overhangs, walls under 0.8 mm, floating parts, a base that may tip, bigger than a 220×220×250 bed) never block the STL; show them to the user.
   Holes, bad winding and floating parts get one repair pass first, listed in `"repaired"`.
   Only an STL that is still not watertight after that, or doesn't fit `fit_bed`, is refused with 422.
+- Every STL is then sliced into PLA G-code for the CUHK Library MakerSpace's Creality K1C
+  (`server/profiles/creality_k1c_pla.ini`: 0.4 mm nozzle, 0.2 mm layers, PLA 1.75 mm at 220/60 °C,
+  3 walls, 15% grid infill, organic supports, Klipper `START_PRINT`/`END_PRINT`) with the PrusaSlicer CLI,
+  and the report adds `"gcode"`:
+  `{"printer": "Creality K1C (CUHK MakerSpace)", "filament": "PLA 1.75 mm", "layer_mm": 0.2, "filename": "mug.gcode", "print_time": "2h 5m 10s", "print_time_s": 7510, "filament_g": 31.4, "filament_m": 10.53, "bounds_mm": [[80.1, 80.4, 0.2], [139.9, 139.6, 122.6]], "size_bytes": 5123456}`.
+  The toolpath is checked to stay inside the 220 × 220 × 250 mm build volume. A model that is too
+  big, a slice that fails or takes over `PRINT_SLICE_TIMEOUT_S` (300 s), or a server without
+  `prusa-slicer` (or `PRUSA_SLICER`) gives `{"skipped": "<why>", ...}` instead; the STL is still returned.
+- `GET /print/{job_id}/gcode` (same auth, held open until the job ends) returns the G-code as
+  `text/x-gcode`, `Content-Disposition: attachment; filename="<upload name>.gcode"`, or 404 with the
+  skip reason. Copy it to a USB stick for the MakerSpace printer (no Wi-Fi printing there).
 
 Errors are JSON `{"detail": "..."}`:
 
@@ -164,7 +175,7 @@ flushed as it goes:
 {"type":"done","progress":1.0,"filename":"mug.stl","report":{...X-Print-Report...},"stl_base64":"...","elapsed_s":41.8}
 ```
 
-- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`, `check`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
+- Stages, in order: `received`, `background`, `reconstruct`, `mesh`, `fuse` (depth only), `repair`, `export`, `check`, `slice`. A mesh goes straight from `received` to `repair`. Each stage is sent once, in order.
 - The current stage repeats about every 2 s as a heartbeat, including during slow job-store reads. Its `progress` creeps toward the next stage's start and never reaches it. On Modal an always-warm CPU frontend accepts and validates uploads without waiting for a GPU, then dispatches each print to an L4 function. The GPU container retains TripoSR between jobs; its GIL cannot block the frontend. Local/dev uses an in-process runner.
 - Modal jobs start at `queued` ("Waiting for a print server GPU"). They can wait up to 10 minutes for scheduling before becoming an error; the normal 90-second worker-staleness rule applies only after execution starts. Both streamed and synchronous requests use the same shared job state and retry/join semantics.
 - The last line is exactly one `done`, or `{"type":"error","status":422,"detail":"...","elapsed_s":...}`. A stream that ends without either means the connection dropped, not that the print failed: resume it.
@@ -206,6 +217,8 @@ Whenever `PRINT_S3_BUCKET` is configured, the worker also saves the STL to
 form field is needed. The NDJSON final line keeps its existing report and
 `stl_base64` payload and adds `stl_url` (presigned GET),
 `stl_file_id` (`results/<job_id>/model.stl`) and `stl_expires_in` (3600).
+A sliced job also saves `results/<job_id>/model.gcode` (`text/x-gcode`) and adds
+`gcode_url`, `gcode_file_id` and `gcode_expires_in` the same way; G-code is never inlined.
 `GET /print/{job_id}` re-signs the URL, including NDJSON replay (which continues
 to omit base64 as before). Synchronous POST and `GET /print/{job_id}/result`
 keep returning the identical STL bytes and `X-Print-Report`; link metadata is
