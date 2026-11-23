@@ -24,7 +24,7 @@ _AXIS = re.compile(rb"([XYZ])(-?\d+\.?\d*)")
 
 def slicer():
     path = os.environ.get("PRUSA_SLICER") or shutil.which("prusa-slicer")
-    return path if path and os.access(path, os.X_OK) else None
+    return os.path.abspath(path) if path and os.access(path, os.X_OK) else None
 
 
 def _seconds(text):
@@ -81,6 +81,8 @@ def slice_stl(stl, extents_mm, name):
                                  env=dict(os.environ, MALLOC_ARENA_MAX="2"))
         except subprocess.TimeoutExpired:
             return None, dict(base, skipped=f"slicing took over {TIMEOUT_S:g} s")
+        except OSError as exc:
+            return None, dict(base, skipped=f"the slicer could not start: {exc.strerror or exc}")
         if run.returncode != 0 or not os.path.exists(out):
             lines = (run.stderr or run.stdout).decode("utf-8", "replace").strip().splitlines()
             return None, dict(base, skipped="the slicer failed: " + (lines[-1] if lines else f"exit {run.returncode}"))
