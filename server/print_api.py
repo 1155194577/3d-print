@@ -25,7 +25,7 @@ from fastapi import APIRouter, Body, FastAPI, File, Form, Header, HTTPException,
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -503,6 +503,9 @@ async def print_gcode_result(job_id: str):
         return JSONResponse({"detail": state["detail"]}, status_code=state["status"])
     info = state["report"].get("gcode") or {}
     if not state.get("gcode_chunks"):
+        signed = await run_in_threadpool(print_uploads.result_fields, state)
+        if "gcode_url" in signed:
+            return RedirectResponse(signed["gcode_url"], status_code=307)
         return JSONResponse({"detail": "no G-code for this print: " + info.get("skipped", "not sliced")},
                             status_code=404)
     name = info.get("filename", "model.gcode")

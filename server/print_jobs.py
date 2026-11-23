@@ -136,7 +136,7 @@ def run_existing(job_id, run):
                         logging.getLogger(__name__).warning("could not upload %s result job_id=%s error=%s",
                                                            label, job_id, type(exc).__name__)
             result["stl_chunks"] = _put_chunks(f"{job_id}:stl", body)
-            if gcode is not None:
+            if gcode is not None and "gcode_file_id" not in result:  # served from storage when uploaded
                 result["gcode_chunks"] = _put_chunks(f"{job_id}:gcode", gcode)
             save(type="done", report=report, **result)
         except HTTPException as exc:

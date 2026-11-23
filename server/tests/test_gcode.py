@@ -105,3 +105,37 @@ def test_real_slice_fits_the_k1c():
     lo, hi = report["bounds_mm"]
     assert min(lo) >= 0 and hi[0] <= 220 and hi[1] <= 220 and 19.5 < hi[2] <= 250
     assert report["print_time_s"] > 0 and report["filament_g"] > 0
+
+
+def test_non_ascii_names_download_with_an_encoded_filename(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("PRUSA_SLICER", fake_slicer(tmp_path))
+    out = mesh_print(client, name="杯子.obj")
+    resp = client.get(f"/print/{out[0]['job_id']}/gcode")
+    assert resp.status_code == 200
+    assert "filename*=UTF-8''%E6%9D%AF%E5%AD%90.gcode" in resp.headers["content-disposition"]
+
+
+def test_uploaded_gcode_is_served_from_storage_not_memory(monkeypatch, tmp_path):
+    import boto3
+    from moto import mock_aws
+
+    for k, v in dict(AWS_ACCESS_KEY_ID="testing", AWS_SECRET_ACCESS_KEY="testing", AWS_REGION="us-east-1",
+                     PRINT_S3_BUCKET="print-test-uploads", PRUSA_SLICER=fake_slicer(tmp_path)).items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    monkeypatch.delenv("PRINT_API_TOKEN", raising=False)
+    monkeypatch.setattr(print_jobs, "store", print_jobs.MemoryStore())
+    monkeypatch.setattr(api, "POLL_S", 0.01)
+    with mock_aws():
+        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="print-test-uploads")
+        with TestClient(create_app(Settings(jobs_dir=tmp_path / "jobs"))) as c:
+            out = mesh_print(c)
+            job_id = out[0]["job_id"]
+            assert out[-1]["gcode_url"] and "gcode_chunks" not in print_jobs.store.get(job_id)
+            resp = c.get(f"/print/{job_id}/gcode", follow_redirects=False)
+            assert resp.status_code == 307 and resp.headers["location"] == print_uploads_url(resp)
+
+
+def print_uploads_url(resp):
+    assert "results/" in resp.headers["location"] and "model.gcode" in resp.headers["location"]
+    return resp.headers["location"]
