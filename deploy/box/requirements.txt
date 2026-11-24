@@ -5,4 +5,5 @@
 pymeshfix
 manifold3d
 networkx               # trimesh hole filling in printability checks
+scikit-image>=0.23     # enclosed topology cavity meshing
 modal>=1.6

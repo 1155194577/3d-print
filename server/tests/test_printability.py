@@ -74,7 +74,7 @@ def test_sealed_cavity_is_not_a_floating_part():
     inner.invert()
     hollow = trimesh.util.concatenate([box(30, 30, 30), inner])
     r = p.check(hollow)
-    assert r["parts"] == 2 and not any("float" in w for w in r["warnings"])
+    assert r["parts"] == 1 and not r["warnings"] and not r["repairable"]
     assert p.fix(hollow).volume == pytest.approx(30 ** 3 - 10 ** 3, rel=1e-6)
 
 

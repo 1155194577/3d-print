@@ -34,6 +34,7 @@ import depth_fusion  # noqa: E402
 import img2mesh  # noqa: E402
 import photo_level  # noqa: E402
 import printability  # noqa: E402
+import topology  # noqa: E402
 
 from server import print_gcode, print_jobs, print_uploads  # noqa: E402
 
@@ -288,6 +289,7 @@ def print_stl(
     up_axis: str = Form("y", pattern="^(y|z)$"),
     fit_bed: str | None = Form(None),
     base_plate: bool = Form(True),
+    optimise: bool = Form(False),
     depth: UploadFile | None = File(None, description="ARKit sceneDepth: float32 LE metres (or 16-bit PNG, mm)"),
     depth_width: int | None = Form(None, gt=0),
     depth_height: int | None = Form(None, gt=0),
@@ -379,7 +381,7 @@ def print_stl(
         raise
     name = os.path.splitext(os.path.basename(stem or "model"))[0] or "model"
     job = dict(src=src, is_mesh=mesh is not None, frame=frame, gravity=gravity, height=height, bed=bed,
-               base_plate=base_plate, base_thickness=base_thickness,
+               base_plate=base_plate, base_thickness=base_thickness, optimise=optimise,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
                mode=mode, face_to_world=face_to_world, image_orientation=image_orientation,
                views=views, name=name)
@@ -521,6 +523,7 @@ STAGES = {
     "mesh": (0.45, "Extracting the mesh"),
     "fuse": (0.60, "Fitting to the LiDAR depth"),
     "repair": (0.75, "Repairing and adding the base"),
+    "optimise": (0.80, "Removing unloaded material"),
     "export": (0.88, "Writing the STL"),
     "check": (0.92, "Checking it will print"),
     "slice": (0.95, "Slicing G-code for the MakerSpace K1C"),
@@ -592,6 +595,11 @@ def _make_stl(job, progress):
         raise HTTPException(422, str(exc))
     except Exception as exc:
         raise HTTPException(422, f"could not process the mesh: {exc}")
+    optimisation = None
+    if job.get("optimise", False):
+        progress("optimise")
+        out, optimisation = topology.optimise(out)
+        report.update(watertight=out.is_watertight, faces=len(out.faces), volume_cm3=out.volume / 1000)
     progress("export")
     body = out.export(file_type="stl")
     progress("check")
@@ -604,6 +612,7 @@ def _make_stl(job, progress):
         "extents_mm": [round(float(v), 1) for v in ex],
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),
+        **({"optimise": optimisation} if optimisation is not None else {}),
         "faces": int(report["faces"]),
         **({"level": report["level"]} if "level" in report else {}),
         "volume_cm3": round(report["volume_cm3"], 1) if report["volume_cm3"] else None,
