@@ -137,6 +137,25 @@ def test_photo_uses_measured_height(client, monkeypatch):
     assert stl.extents[2] == pytest.approx(200 + 2.5, abs=1)
 
 
+def test_photo_mesh_is_simplified_before_repair(client, monkeypatch):
+    def fake_triposr(image_path, out_path, **_):
+        trimesh.creation.icosphere(subdivisions=5, radius=0.4).export(out_path)
+    monkeypatch.setattr(api, "reconstruct_photo", fake_triposr)
+    monkeypatch.setattr(api, "PHOTO_MAX_FACES", 2000)
+    stl, rep = report(post(client, {"photo": ("ball.jpg", b"jpeg")}, {"height_mm": "60"}))
+    assert rep["simplified"]["faces_before"] == 20480
+    assert rep["simplified"]["faces_after"] <= 2000
+    assert stl.is_watertight and rep["printability"]["printable"]
+
+
+def test_small_photo_mesh_is_not_simplified(client, monkeypatch):
+    def fake_triposr(image_path, out_path, **_):
+        trimesh.creation.cylinder(radius=0.3, height=0.8).export(out_path)
+    monkeypatch.setattr(api, "reconstruct_photo", fake_triposr)
+    _, rep = report(post(client, {"photo": ("can.jpg", b"jpeg")}))
+    assert "simplified" not in rep
+
+
 @pytest.mark.parametrize("files,data,code", [
     ({}, {}, 400),
     ({"mesh": ("a.obj", b"x"), "photo": ("a.jpg", b"x")}, {}, 400),
