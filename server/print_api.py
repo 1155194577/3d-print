@@ -80,6 +80,8 @@ MESH_EXTS = (".obj", ".ply", ".usdz", ".usd", ".usdc", ".usda", ".glb", ".stl")
 TRIPOSR_MODEL = os.environ.get("TRIPOSR_MODEL", "stabilityai/TripoSR")
 # TripoSR meshes are ~300k faces; repairing that needs ~1 GB, more than the box has.
 PHOTO_MAX_FACES = int(os.environ.get("PRINT_PHOTO_MAX_FACES", "50000"))
+# fast_simplification keeps the mesh in C++ globals between load and simplify.
+_SIMPLIFY_LOCK = threading.Lock()
 
 
 class PhotoReconstructor:
@@ -634,7 +636,8 @@ def _simplify(path, max_faces):
     if max_faces <= 0 or before <= max_faces:
         return None
     try:
-        mesh = mesh.simplify_quadric_decimation(face_count=max_faces)
+        with _SIMPLIFY_LOCK:
+            mesh = mesh.simplify_quadric_decimation(face_count=max_faces)
     except Exception as exc:  # keep the full mesh; repair may still fit
         return {"skipped": f"could not simplify: {exc}"}
     mesh.export(path)
