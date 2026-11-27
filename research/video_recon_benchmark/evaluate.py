@@ -148,6 +148,8 @@ def evaluate(archives, dataset, output, figure, seconds):
         with np.load(path) as data:
             if not np.array_equal(data["timestamps"], ref["timestamps"]):
                 raise ValueError(f"{path}: frame timestamps differ from the reference clip")
+            if not np.array_equal(data["depth_offsets"], ref["depth_offsets"]):
+                raise ValueError(f"{path}: depth associations differ from the reference clip")
             predicted = data["poses_c2w"]
             if predicted.shape != ref["gt_pose"].shape or not np.isfinite(predicted).all():
                 raise ValueError(f"{path}: invalid pose outputs")

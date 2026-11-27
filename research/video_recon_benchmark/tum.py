@@ -18,6 +18,30 @@ def interpolate_poses(trajectory, timestamps):
     return poses
 
 
+def select_frames(rgb_times, depth_ids, target):
+    """Minimize total target-time error without reusing a depth or RGB frame."""
+    distances = np.abs(target[:, None] - rgb_times)
+    distances[distances > 0.15] = np.inf
+    # Nearest depth indices are nondecreasing in RGB order.
+    predecessor_limits = np.searchsorted(depth_ids, depth_ids)
+    cost = distances[0]
+    parents = np.full(distances.shape, -1)
+    for frame in range(1, len(target)):
+        minimum = np.minimum.accumulate(cost)
+        best = np.maximum.accumulate(np.where(cost == minimum, np.arange(len(cost)), -1))
+        can_follow = predecessor_limits > 0
+        previous = predecessor_limits[can_follow] - 1
+        parents[frame, can_follow] = best[previous]
+        cost = np.where(can_follow, minimum[predecessor_limits - 1], np.inf) + distances[frame]
+    selected = np.empty(len(target), dtype=int)
+    selected[-1] = cost.argmin()
+    if not np.isfinite(cost[selected[-1]]):
+        raise ValueError("not enough synchronized RGB/depth/pose timestamps for the requested clip")
+    for frame in range(len(target) - 1, 0, -1):
+        selected[frame - 1] = parents[frame, selected[frame]]
+    return selected
+
+
 def load_sequence(root: Path, count: int, seconds: float, width: int, height: int):
     rgb = records(root / "rgb.txt")
     depth = records(root / "depth.txt")
@@ -36,9 +60,7 @@ def load_sequence(root: Path, count: int, seconds: float, width: int, height: in
     end = min(start + seconds, rt[valid[-1]])
     valid = valid[rt[valid] <= end]
     target = np.linspace(start, end, count)
-    ids = valid[np.abs(rt[valid, None] - target).argmin(axis=0)]
-    if np.unique(ids).size != count or np.max(np.abs(rt[ids] - target)) > 0.15:
-        raise ValueError("not enough synchronized RGB/depth/pose timestamps for the requested clip")
+    ids = valid[select_frames(rt[valid], depth_ids[valid], target)]
     timestamps = rt[ids]
     depth_timestamps = paired_depth[ids]
 
