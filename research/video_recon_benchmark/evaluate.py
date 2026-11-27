@@ -137,7 +137,7 @@ def evaluate(archives, dataset, output, figure, seconds):
         count = len(first["timestamps"])
     # Reference sampling grid is identical for every model, independent of its resize.
     ref = load_sequence(dataset, count, seconds, 640, 480)
-    reference, colors = voxel_sample(*point_cloud(ref["rgb"], ref["gt_depth"], ref["gt_pose"],
+    reference, colors = voxel_sample(*point_cloud(ref["rgb"], ref["gt_depth"], ref["gt_depth_pose"],
                                                   ref["gt_intrinsics"], stride=5))
     tree = cKDTree(reference)
     clouds = [("RGB-D reference", reference, colors)]
