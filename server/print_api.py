@@ -124,7 +124,7 @@ class PhotoReconstructor:
             return np.asarray(rembg.remove(img, session=self.rembg_session, only_mask=True))
 
     def __call__(self, image_path, out_path, mc_resolution=256, foreground_ratio=0.85,
-                 quarter_turns=None, progress=None):
+                 quarter_turns=None, progress=None, input_path=None):
         progress = progress or (lambda *a: None)
         import numpy as np
         import torch
@@ -144,6 +144,8 @@ class PhotoReconstructor:
             arr = np.array(image).astype(np.float32) / 255.0
             arr = arr[:, :, :3] * arr[:, :, 3:4] + (1 - arr[:, :, 3:4]) * 0.5
             image = Image.fromarray((arr * 255.0).astype(np.uint8))
+            if input_path is not None:
+                image.save(input_path)
             with torch.no_grad():
                 progress("reconstruct")
                 codes = self.model([image], device=self.device)
@@ -265,7 +267,7 @@ def _load_face_views(form, count, workdir):
                 depth_intrinsics=get("depth_intrinsics"), depth_extrinsics=get("depth_extrinsics"))
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, f"{prefix}: {exc}")
-        views.append(dict(src=src, frame=frame, face_to_world=anchor))
+        views.append(dict(src=src, frame=frame, face_to_world=anchor, side=get("side")))
     return views
 
 
@@ -293,6 +295,7 @@ def print_stl(
     up_axis: str = Form("y", pattern="^(y|z)$"),
     fit_bed: str | None = Form(None),
     base_plate: bool = Form(True),
+    model_check: bool = Form(False),
     optimise: bool = Form(False),
     depth: UploadFile | None = File(None, description="ARKit sceneDepth: float32 LE metres (or 16-bit PNG, mm)"),
     depth_width: int | None = Form(None, gt=0),
@@ -324,8 +327,8 @@ def print_stl(
             raise ValueError
     except (ValueError, TypeError):
         raise HTTPException(400, "view_count must be an integer between 1 and 5")
-    if view_count > 1 and (mode != "face" or depth is None):
-        raise HTTPException(400, "multiple views require mode=face and front depth")
+    if view_count > 1 and (photo is None or depth is None):
+        raise HTTPException(400, "multiple views require a primary photo with depth")
     face_to_world = None
     if mode == "face" and face_transform is not None:
         import numpy as np
@@ -388,7 +391,7 @@ def print_stl(
                base_plate=base_plate, base_thickness=base_thickness, optimise=optimise,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
                mode=mode, face_to_world=face_to_world, image_orientation=image_orientation,
-               views=views, name=name)
+               views=views, name=name, model_check=model_check and mode == "object" and mesh is None)
 
     try:
         if not submit_job(job_id, job, f"{name}.stl"):
@@ -526,6 +529,7 @@ STAGES = {
     "reconstruct": (0.15, "Reconstructing the shape"),
     "mesh": (0.45, "Extracting the mesh"),
     "fuse": (0.60, "Fitting to the LiDAR depth"),
+    "review": (0.68, "Checking the reconstructed shape"),
     "repair": (0.75, "Repairing and adding the base"),
     "optimise": (0.80, "Removing unloaded material"),
     "export": (0.88, "Writing the STL"),
@@ -541,20 +545,24 @@ def _make_stl(job, progress):
     gravity = job["gravity"]
     mode = job["mode"]
     fusion = simplified = None
+    review = None
+    cameras = {}
     if job["is_mesh"]:
         kwargs = dict(units_to_mm=job["units_to_mm"], up_axis=job["up_axis"])
     else:
         img, src = src, os.path.join(job["workdir"], "raw.obj")
+        input_path = os.path.join(job["workdir"], "triposr_input.png")
+        review_options = {"input_path": input_path} if job.get("model_check") else {}
         try:
             mask = None
             if frame is None:
                 orientation = job["image_orientation"]
                 turns = gravity[1] if gravity else {1: 0, 3: 2, 6: 3, 8: 1}.get(orientation)
-                reconstruct_photo(img, src, quarter_turns=turns, progress=progress)
+                reconstruct_photo(img, src, quarter_turns=turns, progress=progress, **review_options)
             else:
                 photo_up = frame.depth_to_photo[:3, :3] @ frame.up_camera()
                 turns = depth_fusion.upright_turns(photo_up)
-                reconstruct_photo(img, src, quarter_turns=turns, progress=progress)
+                reconstruct_photo(img, src, quarter_turns=turns, progress=progress, **review_options)
                 progress("fuse")
                 mask = reconstruct_photo.foreground_mask(img)
         except Exception as exc:
@@ -572,7 +580,13 @@ def _make_stl(job, progress):
                     fused, fusion = depth_fusion.fuse_face(
                         raw, frame, mask, job["face_to_world"], views=views)
                 else:
-                    fused, fusion = depth_fusion.fuse(raw, frame, mask)
+                    options = {}
+                    if job.get("views"):
+                        options["views"] = [dict(view, mask=reconstruct_photo.foreground_mask(view["src"]))
+                                            for view in job["views"]]
+                    if job.get("model_check"):
+                        options["cameras"] = cameras
+                    fused, fusion = depth_fusion.fuse(raw, frame, mask, **options)
                 src = os.path.join(job["workdir"], "fused.ply")
                 fused.export(src)
                 kwargs = dict(units_to_mm=1000.0, up_axis="z")
@@ -591,6 +605,30 @@ def _make_stl(job, progress):
             bust = depth_fusion.cut_bust(raw, raw.bounds[0, 2] + 0.2 * raw.extents[2])
             src = os.path.join(job["workdir"], "bust.ply")
             bust.export(src)
+        if job.get("model_check"):
+            progress("review")
+            try:
+                import trimesh
+                from PIL import Image
+                from server import model_check
+
+                if "front" in cameras:
+                    reference = Image.open(img).convert("RGB")
+                    camera = cameras["front"]
+                    review_views = []
+                    for index, view in enumerate(job.get("views", []), 1):
+                        name = f"view_{index}"
+                        if name in cameras:
+                            review_views.append(dict(name=name, photo=Image.open(view["src"]).convert("RGB"),
+                                                     camera=cameras[name], side=view.get("side")))
+                else:
+                    reference = Image.open(input_path).convert("RGB")
+                    camera = model_check.nominal_camera(reference.width)
+                    review_views = []
+                review = model_check.check(reference, trimesh.load(src, force="mesh"), camera,
+                                           views=review_views, can_retake="front" in cameras and frame.camera_to_world is not None)
+            except Exception:
+                review = {"skipped": "Model review unavailable; the print was not blocked."}
     progress("repair")
     try:
         out, report = img2mesh.prepare_mesh(
@@ -617,6 +655,7 @@ def _make_stl(job, progress):
         "extents_mm": [round(float(v), 1) for v in ex],
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),
+        **({"model_check": review} if review is not None else {}),
         **({"optimise": optimisation} if optimisation is not None else {}),
         **({"simplified": simplified} if simplified else {}),
         "faces": int(report["faces"]),

@@ -137,6 +137,46 @@ def test_photo_uses_measured_height(client, monkeypatch):
     assert stl.extents[2] == pytest.approx(200 + 2.5, abs=1)
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_opt_in_model_review_report(client, monkeypatch, stream):
+    from PIL import Image
+    from server import model_check
+
+    def fake(image_path, out_path, input_path=None, progress=None, **kwargs):
+        for stage in ("background", "reconstruct", "mesh"):
+            progress(stage)
+        trimesh.creation.box().export(out_path)
+        if input_path:
+            Image.new("RGB", (128, 128), "grey").save(input_path)
+
+    monkeypatch.setattr(api, "reconstruct_photo", fake)
+    monkeypatch.setattr(model_check.SiliconFlowVLM, "__call__",
+                        lambda self, image, questions, **kw: {key: "yes" for key in questions})
+    headers = {"Accept": "application/x-ndjson"} if stream else {}
+    response = post(client, {"photo": ("can.jpg", b"jpeg")}, {"model_check": "true"}, headers)
+    if stream:
+        events = [json.loads(line) for line in response.text.splitlines()]
+        rep = events[-1]["report"]
+        stages = [event["stage"] for event in events if event["type"] == "progress"]
+        assert "review" in stages and stages.index("review") < stages.index("repair")
+    else:
+        _, rep = report(response)
+    assert rep["model_check"]["ok"] and len(rep["model_check"]["sides"]) == 4
+    _, default = report(post(client, {"photo": ("can.jpg", b"jpeg")}))
+    assert "model_check" not in default
+    _, uploaded = report(post(client, {"mesh": ("box.obj", scan_box().export(file_type="obj"))},
+                              {"model_check": "true"}))
+    assert "model_check" not in uploaded
+
+
+def test_review_failure_does_not_fail_print(client, monkeypatch):
+    def fake(image_path, out_path, **kwargs):
+        trimesh.creation.box().export(out_path)
+    monkeypatch.setattr(api, "reconstruct_photo", fake)
+    _, rep = report(post(client, {"photo": ("can.jpg", b"jpeg")}, {"model_check": "true"}))
+    assert "skipped" in rep["model_check"]
+
+
 def test_photo_mesh_is_simplified_before_repair(client, monkeypatch):
     def fake_triposr(image_path, out_path, **_):
         trimesh.creation.icosphere(subdivisions=5, radius=0.4).export(out_path)

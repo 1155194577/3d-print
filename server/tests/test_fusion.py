@@ -54,7 +54,10 @@ class FakeTripoSR:
         self.mask = mask
         self.turns = "unset"
 
-    def __call__(self, image_path, out_path, quarter_turns=None, progress=None):
+    def __call__(self, image_path, out_path, quarter_turns=None, progress=None, input_path=None):
+        if input_path is not None:
+            from PIL import Image
+            Image.new("RGB", (128, 128), "grey").save(input_path)
         self.turns = quarter_turns
         ext = BOX[1] - BOX[0]
         box = trimesh.creation.box(extents=[ext[0], ext[2], ext[1]]).subdivide().subdivide()
@@ -190,6 +193,64 @@ def test_depth_needs_photo(client):
     resp = client.post("/print", files={"mesh": ("a.obj", b"v 0 0 0"),
                                         "depth": ("d.f32", b"\0\0\0\0")})
     assert resp.status_code == 400
+
+
+def test_object_extra_view_fusion_and_cameras(client, monkeypatch):
+    from server import model_check
+
+    M = camera_to_world()
+    depth, mask = render(M)
+    other = camera_to_world(eye=(-0.12, 0.33, 0.42))
+    other_depth, other_mask = render(other)
+    fake = FakeTripoSR(mask)
+    fake.foreground_mask = lambda path: (other_mask if "view_1" in path else mask).astype(np.uint8) * 255
+    monkeypatch.setattr(api, "reconstruct_photo", fake)
+    checked = []
+
+    def check(photo, mesh, camera, views, can_retake):
+        assert can_retake and len(views) == 1 and views[0]["name"] == "view_1"
+        assert views[0]["side"] == "left"
+        K, R, t = camera
+        extra_K, extra_R, extra_t = views[0]["camera"]
+        np.testing.assert_allclose(K, [[1500, 0, 960], [0, 1500, 720], [0, 0, 1]])
+        np.testing.assert_allclose(extra_K, K)
+        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-6)
+        assert np.linalg.norm(extra_t - t) > .01
+        assert not np.allclose(extra_R, R)
+        checked.append(True)
+        return {"ok": True}
+
+    monkeypatch.setattr(model_check, "check", check)
+    files, data = frame_request(depth, M, view_count="2", model_check="true")
+    files.update(view_1_photo=("extra.jpg", photo_bytes()),
+                 view_1_depth=("extra.f32", other_depth.astype("<f4").tobytes()))
+    data.update(view_1_depth_width=str(W), view_1_depth_height=str(H),
+                view_1_intrinsics=json.dumps(INTR), view_1_camera_transform=json.dumps(other.T.ravel().tolist()),
+                view_1_image_orientation="1", view_1_side="left")
+    _, rep = result(client.post("/print", files=files, data=data))
+    assert rep["fusion"]["views_used"] == 2 and rep["fusion"]["views_skipped"] == []
+    assert rep["model_check"] == {"ok": True} and checked
+    assert "front" not in rep["fusion"]
+
+
+def test_extra_views_require_primary_depth(client):
+    response = client.post("/print", files={"photo": ("front.jpg", photo_bytes())}, data={"view_count": "2"})
+    assert response.status_code == 400
+    assert "primary photo with depth" in response.json()["detail"]
+
+
+def test_photo_camera_uses_depth_extrinsics():
+    frame = api.depth_fusion.Frame(np.ones((20, 30)), np.eye(3), photo_size=(60, 40))
+    E = trimesh.transformations.rotation_matrix(.2, [0, 1, 0])
+    E[:3, 3] = [.01, .02, .03]
+    frame.depth_to_photo = E
+    frame.photo_K = np.diag([100., 110., 1.])
+    G = trimesh.transformations.rotation_matrix(.3, [1, 0, 0])[:3, :3]
+    origin = np.array([.1, .2, .3])
+    K, R, t = api.depth_fusion.photo_camera(frame, G, origin)
+    np.testing.assert_allclose(K, frame.photo_K)
+    np.testing.assert_allclose(R, E[:3, :3] @ G.T)
+    np.testing.assert_allclose(t, E[:3, :3] @ origin + E[:3, 3])
 
 
 def test_portrait_without_transform_or_floor(client, monkeypatch):
