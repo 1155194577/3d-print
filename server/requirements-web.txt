@@ -5,6 +5,7 @@ python-multipart>=0.0.9
 boto3>=1.35
 numpy>=2.0
 trimesh>=4.0
+fast-simplification>=0.1   # trimesh decimation of TripoSR meshes
 scipy>=1.11
 pillow>=10.0
 usd-core>=24.0          # USDZ scans for POST /print

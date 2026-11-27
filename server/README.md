@@ -27,12 +27,21 @@ modal deploy deploy/modal_app.py               # serverless GPU, see that file
 | `fit_bed` | `WxDxH` mm | | Shrink, only if needed, to fit this printer bed, e.g. `220x220x250`. |
 | `base_plate` | bool | `true` | Fuse a 3 mm plate underneath (adds 2.5 mm of height and a margin around). |
 | `model_check` | bool | `false` | Advisory render-versus-photo review for object-mode photo prints; ignored for meshes and face mode. |
+| `optimise` | bool | `false` | Remove low-stress interior material with coarse topology optimisation. |
 
 Header `Authorization: Bearer <token>` is required when the server has `PRINT_API_TOKEN` set (the Modal deploy does).
 
 Sizing: a mesh keeps its real size (metres → mm). `height_mm` is the object itself; the
 base plate adds 2.5 mm below it, so a 120 mm object comes back 122.5 mm tall. A photo
 without `height_mm` is scaled to 200 mm on its largest side.
+
+`optimise=true` optionally removes enclosed, low-stress interior material after repair,
+preserving the original exterior, at least a 2 mm shell and a 3 mm bottom layer.
+The coarse SIMP model assumes the bottom is fixed and a uniform downward load acts on
+top-exposed surfaces; it is not a strength guarantee for other loads. The `optimise`
+report key contains `volume_saved_pct`, `volume_cm3_before`, and `volume_cm3_after`,
+or `{"skipped": "reason"}` if optimisation fails or saves less than 5%. With the
+option omitted or false, the existing STL and report are unchanged (no added key).
 
 ### Photo + LiDAR depth
 

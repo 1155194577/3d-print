@@ -16,6 +16,7 @@ PRINTER = "Creality K1C (CUHK MakerSpace)"
 FILAMENT = "PLA 1.75 mm"
 BED_MM = (220.0, 220.0, 250.0)
 TIMEOUT_S = float(os.environ.get("PRINT_SLICE_TIMEOUT_S", "300"))
+THREADS = os.environ.get("PRINT_SLICE_THREADS", "1")
 _one_at_a_time = threading.Lock()  # each slice holds ~250 MB; the box caps the service at 750 MB
 
 _MOVE = re.compile(rb"^G[01] [^;\n]*", re.M)
@@ -75,7 +76,7 @@ def slice_stl(stl, extents_mm, name):
         with open(src, "wb") as f:
             f.write(stl)
         cmd = [binary, "--export-gcode", "--load", PROFILE, "--center", f"{BED_MM[0] / 2:g},{BED_MM[1] / 2:g}",
-               "--threads", "2", "-o", out, src]
+               "--threads", THREADS, "-o", out, src]
         try:
             run = subprocess.run(cmd, capture_output=True, timeout=TIMEOUT_S, cwd=tmp,
                                  env=dict(os.environ, MALLOC_ARENA_MAX="2"))

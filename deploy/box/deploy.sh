@@ -44,6 +44,9 @@ if [ ! -f /etc/3d-print/env ]; then
 fi
 install -m 644 "$ROOT/app/deploy/box/3d-print.service" /etc/systemd/system/3d-print.service
 install -m 644 "$ROOT/app/deploy/box/Caddyfile" /etc/caddy/Caddyfile
+# Swap out idle memory instead of evicting code pages, which freezes the box.
+echo "vm.swappiness = 10" > /etc/sysctl.d/90-3d-print.conf
+sysctl -q -p /etc/sysctl.d/90-3d-print.conf
 systemctl daemon-reload
 systemctl enable -q 3d-print caddy
 systemctl restart 3d-print

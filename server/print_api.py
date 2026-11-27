@@ -34,6 +34,7 @@ import depth_fusion  # noqa: E402
 import img2mesh  # noqa: E402
 import photo_level  # noqa: E402
 import printability  # noqa: E402
+import topology  # noqa: E402
 
 from server import print_gcode, print_jobs, print_uploads  # noqa: E402
 
@@ -77,6 +78,10 @@ DEPTH_EXTS = (".f32", ".bin", ".raw", ".png")
 CONFIDENCE_EXTS = (".u8", ".bin", ".raw")
 MESH_EXTS = (".obj", ".ply", ".usdz", ".usd", ".usdc", ".usda", ".glb", ".stl")
 TRIPOSR_MODEL = os.environ.get("TRIPOSR_MODEL", "stabilityai/TripoSR")
+# TripoSR meshes are ~300k faces; repairing that needs ~1 GB, more than the box has.
+PHOTO_MAX_FACES = int(os.environ.get("PRINT_PHOTO_MAX_FACES", "50000"))
+# fast_simplification keeps the mesh in C++ globals between load and simplify.
+_SIMPLIFY_LOCK = threading.Lock()
 
 
 class PhotoReconstructor:
@@ -291,6 +296,7 @@ def print_stl(
     fit_bed: str | None = Form(None),
     base_plate: bool = Form(True),
     model_check: bool = Form(False),
+    optimise: bool = Form(False),
     depth: UploadFile | None = File(None, description="ARKit sceneDepth: float32 LE metres (or 16-bit PNG, mm)"),
     depth_width: int | None = Form(None, gt=0),
     depth_height: int | None = Form(None, gt=0),
@@ -382,7 +388,7 @@ def print_stl(
         raise
     name = os.path.splitext(os.path.basename(stem or "model"))[0] or "model"
     job = dict(src=src, is_mesh=mesh is not None, frame=frame, gravity=gravity, height=height, bed=bed,
-               base_plate=base_plate, base_thickness=base_thickness,
+               base_plate=base_plate, base_thickness=base_thickness, optimise=optimise,
                units_to_mm=img2mesh.UNITS_TO_MM[units], up_axis=up_axis, workdir=workdir,
                mode=mode, face_to_world=face_to_world, image_orientation=image_orientation,
                views=views, name=name, model_check=model_check and mode == "object" and mesh is None)
@@ -525,6 +531,7 @@ STAGES = {
     "fuse": (0.60, "Fitting to the LiDAR depth"),
     "review": (0.68, "Checking the reconstructed shape"),
     "repair": (0.75, "Repairing and adding the base"),
+    "optimise": (0.80, "Removing unloaded material"),
     "export": (0.88, "Writing the STL"),
     "check": (0.92, "Checking it will print"),
     "slice": (0.95, "Slicing G-code for the MakerSpace K1C"),
@@ -537,7 +544,7 @@ def _make_stl(job, progress):
     src, frame, height = job["src"], job["frame"], job["height"]
     gravity = job["gravity"]
     mode = job["mode"]
-    fusion = None
+    fusion = simplified = None
     review = None
     cameras = {}
     if job["is_mesh"]:
@@ -560,6 +567,7 @@ def _make_stl(job, progress):
                 mask = reconstruct_photo.foreground_mask(img)
         except Exception as exc:
             raise HTTPException(422, f"could not reconstruct the photo: {exc}")
+        simplified = _simplify(src, PHOTO_MAX_FACES)
         kwargs = {}
         if frame is not None:
             import trimesh
@@ -630,6 +638,11 @@ def _make_stl(job, progress):
         raise HTTPException(422, str(exc))
     except Exception as exc:
         raise HTTPException(422, f"could not process the mesh: {exc}")
+    optimisation = None
+    if job.get("optimise", False):
+        progress("optimise")
+        out, optimisation = topology.optimise(out)
+        report.update(watertight=out.is_watertight, faces=len(out.faces), volume_cm3=out.volume / 1000)
     progress("export")
     body = out.export(file_type="stl")
     progress("check")
@@ -643,12 +656,31 @@ def _make_stl(job, progress):
         "watertight": bool(report["watertight"]),
         **({"fusion": fusion} if fusion else {}),
         **({"model_check": review} if review is not None else {}),
+        **({"optimise": optimisation} if optimisation is not None else {}),
+        **({"simplified": simplified} if simplified else {}),
         "faces": int(report["faces"]),
         **({"level": report["level"]} if "level" in report else {}),
         "volume_cm3": round(report["volume_cm3"], 1) if report["volume_cm3"] else None,
         "printability": check,
         "scale": report["scale_note"],
     }
+
+
+def _simplify(path, max_faces):
+    """Decimate the mesh at `path` in place to at most `max_faces`. Returns a report or None."""
+    import trimesh
+
+    mesh = trimesh.load(path, force="mesh")
+    before = len(mesh.faces)
+    if max_faces <= 0 or before <= max_faces:
+        return None
+    try:
+        with _SIMPLIFY_LOCK:
+            mesh = mesh.simplify_quadric_decimation(face_count=max_faces)
+    except Exception as exc:  # keep the full mesh; repair may still fit
+        return {"skipped": f"could not simplify: {exc}"}
+    mesh.export(path)
+    return {"faces_before": before, "faces_after": len(mesh.faces)}
 
 
 def _check_printable(body, bed):
